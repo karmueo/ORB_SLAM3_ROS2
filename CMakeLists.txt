@@ -24,6 +24,7 @@ find_package(ORB_SLAM3 REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
+  find_package(ament_cmake_gtest REQUIRED)
 endif()
 
 include_directories(
@@ -55,6 +56,13 @@ add_executable(rgbd
 )
 ament_target_dependencies(rgbd rclcpp sensor_msgs cv_bridge message_filters ORB_SLAM3 Pangolin OpenCV)
 
+add_executable(rgbd-raw-data-converter
+  src/rgbd/rgbd-raw-data-converter.cpp
+  src/rgbd/rgbd-raw-data-converter-node.cpp
+)
+target_include_directories(rgbd-raw-data-converter PRIVATE src/rgbd)
+ament_target_dependencies(rgbd-raw-data-converter rclcpp sensor_msgs)
+
 add_executable(stereo
   src/stereo/stereo.cpp
   src/stereo/stereo-slam-node.cpp
@@ -68,6 +76,7 @@ add_executable(stereo-inertial
 ament_target_dependencies(stereo-inertial rclcpp sensor_msgs cv_bridge ORB_SLAM3 Pangolin OpenCV)
 
 install(TARGETS mono monocular-inertial rgbd stereo stereo-inertial DESTINATION lib/${PROJECT_NAME})
+install(TARGETS rgbd-raw-data-converter DESTINATION lib/${PROJECT_NAME})
 
 install(PROGRAMS scripts/evaluate_trajectory.py
   DESTINATION lib/${PROJECT_NAME}
@@ -76,6 +85,11 @@ install(PROGRAMS scripts/evaluate_trajectory.py
 
 if(BUILD_TESTING)
   ament_add_pytest_test(evaluate_trajectory test/test_evaluate_trajectory.py)
+  ament_add_gtest(test_rgbd_raw_data_converter test/test_rgbd_raw_data_converter.cpp src/rgbd/rgbd-raw-data-converter.cpp)
+  if(TARGET test_rgbd_raw_data_converter)
+    target_include_directories(test_rgbd_raw_data_converter PRIVATE src/rgbd)
+    ament_target_dependencies(test_rgbd_raw_data_converter sensor_msgs)
+  endif()
 endif()
 
 # Install launch files.
