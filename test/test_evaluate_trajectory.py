@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -124,6 +125,83 @@ def test_parse_tbc_and_convert_twc_to_twb(tmp_path):
 
     np.testing.assert_allclose(tbc[:3, 3], [1.0, 2.0, 3.0])
     np.testing.assert_allclose(twb_positions, [[9.0, 18.0, 27.0]])
+
+
+def test_read_openloris_groundtruth_file_skips_metadata_and_deduplicates(tmp_path):
+    """OpenLORIS groundtruth 文件解析应跳过头部元数据并保留首个重复时间戳。"""
+    groundtruth_path = tmp_path / "groundtruth.txt"
+    groundtruth_path.write_text(
+        "scene: cafe\n"
+        "seq: cafe1-1\n"
+        "frame: gt_map base_link\n"
+        "# timestamp tx ty tz qx qy qz qw\n"
+        "\n"
+        "2.0 2 3 4 0 0 0 1\n"
+        "1.0 1 2 3 0 0 0 1\n"
+        "2.0 20 30 40 0 0 0 1\n",
+        encoding="utf-8",
+    )
+
+    gt_times, gt_positions = evaluate_trajectory.read_groundtruth_file(groundtruth_path)
+
+    np.testing.assert_allclose(gt_times, [1.0, 2.0])
+    np.testing.assert_allclose(gt_positions, [[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]])
+
+
+def test_parse_imu_t_b_c1_and_convert_twc_to_twb(tmp_path):
+    """body 模式应支持 OpenLORIS 配置中的 IMU.T_b_c1 外参键名。"""
+    settings_path = tmp_path / "openloris.yaml"
+    settings_path.write_text(
+        "IMU.T_b_c1: !!opencv-matrix\n"
+        "   rows: 4\n"
+        "   cols: 4\n"
+        "   dt: f\n"
+        "   data: [1, 0, 0, 0.1,\n"
+        "          0, 1, 0, 0.2,\n"
+        "          0, 0, 1, 0.3,\n"
+        "          0, 0, 0, 1]\n",
+        encoding="utf-8",
+    )
+
+    tbc = evaluate_trajectory.read_tbc(settings_path)
+    twb_positions = evaluate_trajectory.convert_camera_to_body_positions(
+        np.array([[1.0, 2.0, 3.0]]),
+        np.array([[0.0, 0.0, 0.0, 1.0]]),
+        tbc,
+    )
+
+    np.testing.assert_allclose(tbc[:3, 3], [0.1, 0.2, 0.3])
+    np.testing.assert_allclose(twb_positions, [[0.9, 1.8, 2.7]])
+
+
+def test_extract_tf_message_gt_filters_child_frame():
+    """TFMessage GT 读取应只提取目标 child_frame_id 的 transform。"""
+    ignored_transform = SimpleNamespace(
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=10, nanosec=100), frame_id="gt_map"),
+        child_frame_id="camera",
+        transform=SimpleNamespace(translation=SimpleNamespace(x=9.0, y=9.0, z=9.0)),
+    )
+    selected_transform = SimpleNamespace(
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=10, nanosec=200), frame_id="gt_map"),
+        child_frame_id="base_link",
+        transform=SimpleNamespace(translation=SimpleNamespace(x=1.0, y=2.0, z=3.0)),
+    )
+    message = SimpleNamespace(transforms=[ignored_transform, selected_transform])
+
+    sample = evaluate_trajectory.extract_tf_message_gt_sample(message, "base_link")
+
+    assert sample == pytest.approx((10.0000002, [1.0, 2.0, 3.0]))
+
+
+def test_deduplicate_sorted_samples_keeps_first_timestamp():
+    """GT 样本排序后应删除精确重复时间戳，并保留第一条样本。"""
+    times, positions = evaluate_trajectory.sort_and_deduplicate_gt_samples(
+        [2.0, 1.0, 2.0],
+        [[2.0, 2.0, 2.0], [1.0, 1.0, 1.0], [20.0, 20.0, 20.0]],
+    )
+
+    np.testing.assert_allclose(times, [1.0, 2.0])
+    np.testing.assert_allclose(positions, [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])
 
 
 def test_compute_ate_statistics():

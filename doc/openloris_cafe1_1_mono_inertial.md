@@ -119,7 +119,60 @@ head KeyFrameTrajectory.txt
 
 单目惯性初始化需要足够运动激励。若轨迹为空或很短，优先检查 bag 是否包含连续 IMU、图像时间戳是否单调、以及启动后是否播放了足够长的运动片段。
 
-## 7. 常见问题
+## 7. 轨迹误差测评
+
+节点生成 `KeyFrameTrajectory.txt` 后，可以用离线测评命令读取同一个 rosbag2 中的 OpenLORIS `/gt`，并计算 ATE 平移误差：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/local_setup.bash
+
+PKG=/path/to/ORB_SLAM3_ROS2
+BAG=/path/to/OpenLORIS-Scene/cafe1-1_2_ros2/cafe1-1_vins
+ros2 run orbslam3 evaluate_trajectory \
+  --bag "$BAG" \
+  --trajectory KeyFrameTrajectory.txt \
+  --gt-topic /gt \
+  --gt-child-frame base_link \
+  --settings "$PKG/config/monocular-inertial/OpenLORIS_Cafe_T265.yaml" \
+  --estimate-frame body \
+  --alignment se3 \
+  --output-json cafe1_1_mono_inertial_ate.json
+```
+
+如果本机只保留了 OpenLORIS groundtruth 文本文件，也可以直接读取 TUM 格式真值：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/local_setup.bash
+
+PKG=/path/to/ORB_SLAM3_ROS2
+GT=/path/to/OpenLORIS-Scene/groundtruth/per-sequence/cafe1-1/groundtruth.txt
+ros2 run orbslam3 evaluate_trajectory \
+  --gt-file "$GT" \
+  --trajectory KeyFrameTrajectory.txt \
+  --settings "$PKG/config/monocular-inertial/OpenLORIS_Cafe_T265.yaml" \
+  --estimate-frame body \
+  --alignment se3 \
+  --output-json cafe1_1_mono_inertial_ate.json
+```
+
+参数说明：
+
+- `--bag`：rosbag2 目录；OpenLORIS Cafe1-1 中 `/gt` 通常是 `tf2_msgs/msg/TFMessage`。
+- `--gt-file`：备用 GT 输入源，读取 `groundtruth/per-sequence/cafe1-1/groundtruth.txt` 这类 TUM/OpenLORIS 文本文件；`--bag` 和 `--gt-file` 二选一。
+- `--gt-topic`：bag 中的 GT topic；OpenLORIS 使用 `/gt`，Vicon bag 仍可使用 TransformStamped topic。
+- `--gt-child-frame`：从 TFMessage 中选择目标坐标系；Cafe1-1 使用 `base_link`，对应 `gt_map -> base_link`。
+- `--settings`：ORB_SLAM3 YAML 配置；`--estimate-frame body` 时用于读取 `IMU.T_b_c1`。
+- `--estimate-frame body`：把 ORB_SLAM3 导出的 `Twc` 相机轨迹转换为 `Twb = Twc * inverse(T_body_camera)`，再与 OpenLORIS `base_link` GT 比较。
+- `--alignment se3`：单目惯性轨迹具有真实尺度时使用刚体对齐。`sim3` 会额外估计尺度，适合作为尺度异常诊断；如果 `sim3` 的 `scale` 明显偏离 `1.0`，优先检查初始化、IMU 配置和外参。
+- `--output-json`：可选，写出机器可读 JSON 结果。
+
+输出字段包含 `samples`、`time_start`、`time_end`、`alignment`、`estimate_frame`、`scale`，以及 ATE 的 `rmse_m`、`mean_m`、`median_m`、`std_m`、`min_m`、`max_m`。其中 `samples` 是落在 GT 时间范围内并参与对齐和误差计算的估计轨迹点数量；`rmse_m` 是 ATE 平移均方根误差，单位为米；`scale` 在 `se3` 下固定为 `1.0`，在 `sim3` 下表示额外估计出的轨迹尺度。
+
+通常优先关注 `rmse_m` 和 `samples`：`rmse_m` 越小表示轨迹整体越接近 OpenLORIS GT；`samples` 过少时，结果只代表很短片段。`body` 坐标系测评会把估计轨迹转换到 T265 IMU/body 坐标系，与 `/gt` 的 `base_link` 含义对齐。
+
+## 8. 常见问题
 
 ### 找不到可执行
 
@@ -157,10 +210,10 @@ ros2 bag play "$BAG" \
 
 确认运行的是 `monocular-inertial`，配置为 `OpenLORIS_Cafe_T265.yaml`，并且节点输出包含 `Monocular-Inertial`。该链路调用 ORB_SLAM3 原生 `IMU_MONOCULAR` 和 `TrackMonocular(..., vImuMeas)`。
 
-## 8. 后续 TODO
+## 9. 后续 TODO
 
 - 使用 T265/OpenLORIS 实测结果替换当前沿用的 RealSense T265 示例 IMU 噪声。
-- 基于 OpenLORIS ground truth 或现有评估脚本补充 ATE/RPE 评估流程。
+- 基于 OpenLORIS ground truth 补充 RPE 评估流程或更多误差诊断指标。
 - 设计 D400 深度重投影或 RGB-D-inertial 链路。
 - 将 `camera`、`imu`、viewer、轨迹输出路径参数化。
 - 增加 OpenLORIS 专用 launch 文件。

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""离线读取 ORB_SLAM3 估计轨迹和 Vicon GT，并计算 ATE 平移误差。"""
+"""离线读取 ORB_SLAM3 估计轨迹和 GT，并计算 ATE 平移误差。"""
 
 from __future__ import annotations
 
@@ -79,23 +79,24 @@ def read_tum_trajectory(path: Path | str) -> Trajectory:
 
 
 def read_tbc(path: Path | str) -> np.ndarray:
-    """从 ORB_SLAM3 OpenCV YAML 配置中读取 Tbc 矩阵。
+    """从 ORB_SLAM3 OpenCV YAML 配置中读取 body 到相机外参矩阵。
 
     Args:
         path: ORB_SLAM3 settings YAML 文件路径。
 
     Returns:
-        4x4 的相机到 body/IMU 外参矩阵 Tbc。
+        4x4 的 body/IMU 到相机外参矩阵 Tbc。
 
     Raises:
         FileNotFoundError: 配置文件不存在。
-        ValueError: 配置中缺少 Tbc，或 Tbc 数据不是 16 个元素。
+        ValueError: 配置中缺少 Tbc/IMU.T_b_c1，或矩阵数据不是 16 个元素。
     """
     settings_path = Path(path)
     settings_text = settings_path.read_text(encoding="utf-8")
-    tbc_match = re.search(r"(?ms)^Tbc:\s*!!opencv-matrix\s*(.*?)(?:\n\S|\Z)", settings_text)
+    matrix_key_pattern = r"(?:Tbc|IMU\.T_b_c1)"
+    tbc_match = re.search(rf"(?ms)^{matrix_key_pattern}:\s*!!opencv-matrix\s*(.*?)(?:\n\S|\Z)", settings_text)
     if tbc_match is None:
-        raise ValueError(f"{settings_path} 缺少 Tbc，无法在 body 模式下测评")
+        raise ValueError(f"{settings_path} 缺少 Tbc 或 IMU.T_b_c1，无法在 body 模式下测评")
 
     tbc_block = tbc_match.group(1)
     data_match = re.search(r"(?ms)data\s*:\s*\[(.*?)\]", tbc_block)
@@ -107,6 +108,79 @@ def read_tbc(path: Path | str) -> np.ndarray:
         raise ValueError(f"{settings_path} 的 Tbc data 需要 16 个数值，实际为 {len(data_values)} 个")
 
     return np.asarray(data_values, dtype=float).reshape((4, 4))
+
+
+def sort_and_deduplicate_gt_samples(
+    timestamps: list[float] | np.ndarray, positions: list[list[float]] | np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """按时间排序 GT 样本，并删除精确重复时间戳。
+
+    Args:
+        timestamps: GT 时间戳序列。
+        positions: GT 平移序列，与 timestamps 一一对应。
+
+    Returns:
+        已排序、时间戳严格递增的时间数组和平移数组。
+
+    Raises:
+        ValueError: GT 样本为空，或时间戳和平移数量不一致。
+    """
+    timestamps_array = np.asarray(timestamps, dtype=float)
+    positions_array = np.asarray(positions, dtype=float)
+    if len(timestamps_array) == 0:
+        raise ValueError("GT 数据为空")
+    if len(timestamps_array) != len(positions_array):
+        raise ValueError("GT 时间戳和平移数量不一致")
+
+    sort_indices = np.argsort(timestamps_array, kind="mergesort")
+    sorted_timestamps = timestamps_array[sort_indices]
+    sorted_positions = positions_array[sort_indices]
+    keep_mask = np.ones(len(sorted_timestamps), dtype=bool)
+    keep_mask[1:] = np.diff(sorted_timestamps) != 0.0
+
+    return sorted_timestamps[keep_mask], sorted_positions[keep_mask]
+
+
+def read_groundtruth_file(path: Path | str) -> tuple[np.ndarray, np.ndarray]:
+    """读取 OpenLORIS/TUM 格式 groundtruth 文件中的 GT 平移。
+
+    Args:
+        path: groundtruth.txt 文件路径，每条轨迹行格式为 timestamp x y z qx qy qz qw。
+
+    Returns:
+        GT 时间戳数组和 Nx3 平移数组。
+
+    Raises:
+        FileNotFoundError: 输入文件不存在。
+        ValueError: 有效轨迹为空，或轨迹行不是 8 列浮点数。
+    """
+    groundtruth_path = Path(path)
+    timestamps = []
+    positions = []
+    metadata_prefixes = ("scene:", "frame:", "seq:")
+
+    with groundtruth_path.open("r", encoding="utf-8") as groundtruth_file:
+        for line_number, raw_line in enumerate(groundtruth_file, start=1):
+            stripped_line = raw_line.strip()
+            if not stripped_line or stripped_line.startswith("#") or stripped_line.startswith(metadata_prefixes):
+                continue
+
+            fields = stripped_line.split()
+            if len(fields) != 8:
+                raise ValueError(f"{groundtruth_path}:{line_number} 需要 8 列 GT 轨迹数据，实际为 {len(fields)} 列")
+
+            try:
+                values = [float(field) for field in fields]
+            except ValueError as exc:
+                raise ValueError(f"{groundtruth_path}:{line_number} 包含无法解析的浮点数") from exc
+
+            timestamps.append(values[0])
+            positions.append(values[1:4])
+
+    if not timestamps:
+        raise ValueError(f"{groundtruth_path} 不包含有效 GT 轨迹数据")
+
+    return sort_and_deduplicate_gt_samples(timestamps, positions)
 
 
 def quaternion_to_rotation_matrix(quaternion: np.ndarray) -> np.ndarray:
@@ -272,12 +346,38 @@ def compute_ate_metrics(errors: np.ndarray) -> dict[str, float]:
     }
 
 
-def read_transform_stamped_gt_from_bag(bag_path: Path | str, gt_topic: str) -> tuple[np.ndarray, np.ndarray]:
-    """从 rosbag2 中只读取 Vicon TransformStamped GT topic。
+def extract_tf_message_gt_sample(message: object, gt_child_frame: str | None) -> tuple[float, list[float]] | None:
+    """从 TFMessage 中提取一个指定 child frame 的 GT 样本。
+
+    Args:
+        message: 反序列化后的 tf2_msgs/msg/TFMessage。
+        gt_child_frame: 目标 child_frame_id；None 时使用第一条 transform。
+
+    Returns:
+        匹配到的时间戳和平移；未匹配时返回 None。
+    """
+    for transform_stamped in message.transforms:
+        if gt_child_frame and transform_stamped.child_frame_id != gt_child_frame:
+            continue
+
+        stamp = transform_stamped.header.stamp
+        translation = transform_stamped.transform.translation
+        timestamp = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        position = [translation.x, translation.y, translation.z]
+        return timestamp, position
+
+    return None
+
+
+def read_gt_from_bag(
+    bag_path: Path | str, gt_topic: str, gt_child_frame: str | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """从 rosbag2 中读取 TransformStamped 或 TFMessage GT topic。
 
     Args:
         bag_path: rosbag2 目录路径。
         gt_topic: GT topic 名称。
+        gt_child_frame: TFMessage 中需要提取的 child_frame_id。
 
     Returns:
         GT 时间戳数组和 Nx3 平移数组。
@@ -304,8 +404,9 @@ def read_transform_stamped_gt_from_bag(bag_path: Path | str, gt_topic: str) -> t
         raise RuntimeError(f"rosbag2 中不存在 GT topic {gt_topic}；可用 topic：{available_topics}")
 
     gt_type = topic_types[gt_topic]
-    if gt_type != "geometry_msgs/msg/TransformStamped":
-        raise RuntimeError(f"GT topic {gt_topic} 类型应为 geometry_msgs/msg/TransformStamped，实际为 {gt_type}")
+    supported_types = {"geometry_msgs/msg/TransformStamped", "tf2_msgs/msg/TFMessage"}
+    if gt_type not in supported_types:
+        raise RuntimeError(f"GT topic {gt_topic} 类型应为 TransformStamped 或 TFMessage，实际为 {gt_type}")
 
     message_type = get_message(gt_type)
     timestamps = []
@@ -317,19 +418,36 @@ def read_transform_stamped_gt_from_bag(bag_path: Path | str, gt_topic: str) -> t
             continue
 
         message = deserialize_message(serialized_data, message_type)
-        stamp = message.header.stamp
-        translation = message.transform.translation
-        timestamps.append(float(stamp.sec) + float(stamp.nanosec) * 1e-9)
-        positions.append([translation.x, translation.y, translation.z])
+        if gt_type == "geometry_msgs/msg/TransformStamped":
+            stamp = message.header.stamp
+            translation = message.transform.translation
+            timestamps.append(float(stamp.sec) + float(stamp.nanosec) * 1e-9)
+            positions.append([translation.x, translation.y, translation.z])
+        else:
+            sample = extract_tf_message_gt_sample(message, gt_child_frame)
+            if sample is None:
+                continue
+            timestamp, position = sample
+            timestamps.append(timestamp)
+            positions.append(position)
 
     if not timestamps:
         raise ValueError(f"GT topic {gt_topic} 中没有有效消息")
 
-    timestamps_array = np.asarray(timestamps, dtype=float)
-    positions_array = np.asarray(positions, dtype=float)
-    sort_indices = np.argsort(timestamps_array)
+    return sort_and_deduplicate_gt_samples(timestamps, positions)
 
-    return timestamps_array[sort_indices], positions_array[sort_indices]
+
+def read_transform_stamped_gt_from_bag(bag_path: Path | str, gt_topic: str) -> tuple[np.ndarray, np.ndarray]:
+    """从 rosbag2 中读取 Vicon TransformStamped GT topic。
+
+    Args:
+        bag_path: rosbag2 目录路径。
+        gt_topic: GT topic 名称。
+
+    Returns:
+        GT 时间戳数组和 Nx3 平移数组。
+    """
+    return read_gt_from_bag(bag_path, gt_topic, None)
 
 
 def evaluate_ate(
@@ -404,10 +522,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     Returns:
         配置好的 argparse 解析器。
     """
-    parser = argparse.ArgumentParser(description="计算 ORB_SLAM3 TUM 轨迹相对 Vicon GT 的 ATE 平移误差")
-    parser.add_argument("--bag", required=True, help="rosbag2 目录路径")
+    parser = argparse.ArgumentParser(description="计算 ORB_SLAM3 TUM 轨迹相对 GT 的 ATE 平移误差")
+    gt_source_group = parser.add_mutually_exclusive_group(required=True)
+    gt_source_group.add_argument("--bag", help="rosbag2 目录路径")
+    gt_source_group.add_argument("--gt-file", help="TUM/OpenLORIS groundtruth.txt 文件路径")
     parser.add_argument("--trajectory", default="KeyFrameTrajectory.txt", help="ORB_SLAM3 TUM 轨迹文件")
-    parser.add_argument("--gt-topic", default="/vicon/firefly_sbx/firefly_sbx", help="Vicon GT TransformStamped topic")
+    parser.add_argument("--gt-topic", default="/vicon/firefly_sbx/firefly_sbx", help="GT TransformStamped 或 TFMessage topic")
+    parser.add_argument("--gt-child-frame", help="TFMessage GT 中需要提取的 child_frame_id，例如 base_link")
     parser.add_argument("--settings", help="ORB_SLAM3 YAML 配置；body 模式用于读取 Tbc")
     parser.add_argument("--estimate-frame", choices=["camera", "body"], default="camera", help="估计轨迹所在坐标系")
     parser.add_argument("--alignment", choices=["none", "se3", "sim3"], default="se3", help="轨迹对齐模式")
@@ -428,7 +549,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        gt_times, gt_positions = read_transform_stamped_gt_from_bag(args.bag, args.gt_topic)
+        if args.gt_file:
+            gt_times, gt_positions = read_groundtruth_file(args.gt_file)
+        else:
+            gt_times, gt_positions = read_gt_from_bag(args.bag, args.gt_topic, args.gt_child_frame)
+
         result = evaluate_ate(
             trajectory_path=args.trajectory,
             gt_times=gt_times,
