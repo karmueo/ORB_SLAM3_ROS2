@@ -30,11 +30,17 @@ $ git clone https://github.com/zang09/ORB_SLAM3_ROS2.git orbslam3_ros2
 
 2. Change this [line](https://github.com/zang09/ORB_SLAM3_ROS2/blob/ee82428ed627922058b93fea1d647725c813584e/CMakeLists.txt#L5) to your own `python site-packages` path
 
-3. Change this [line](https://github.com/zang09/ORB_SLAM3_ROS2/blob/ee82428ed627922058b93fea1d647725c813584e/CMakeModules/FindORB_SLAM3.cmake#L8) to your own `ORB_SLAM3` path
+3. Provide your `ORB_SLAM3` root path when building. You can pass it as a CMake argument:
 
 Now, you are ready to build!
 ```
 $ cd ~/colcon_ws
+$ colcon build --symlink-install --packages-select orbslam3 --cmake-args -DORB_SLAM3_ROOT_DIR=/path/to/ORB_SLAM3
+```
+
+Alternatively, export the path before building:
+```
+$ export ORB_SLAM3_ROOT_DIR=/path/to/ORB_SLAM3
 $ colcon build --symlink-install --packages-select orbslam3
 ```
 

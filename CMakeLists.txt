@@ -1,9 +1,6 @@
 cmake_minimum_required(VERSION 3.5)
 project(orbslam3)
 
-# You should set the PYTHONPATH to your own python site-packages path
-set(ENV{PYTHONPATH} "/opt/ros/humble/lib/python3.10/site-packages")
-
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/CMakeModules)
 
 # Default to C++14
@@ -20,9 +17,14 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
+find_package(OpenCV REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(Pangolin REQUIRED)
 find_package(ORB_SLAM3 REQUIRED)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+endif()
 
 include_directories(
   include
@@ -61,9 +63,17 @@ ament_target_dependencies(stereo-inertial rclcpp sensor_msgs cv_bridge ORB_SLAM3
 
 install(TARGETS mono rgbd stereo stereo-inertial DESTINATION lib/${PROJECT_NAME})
 
+install(PROGRAMS scripts/evaluate_trajectory.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME evaluate_trajectory
+)
+
+if(BUILD_TESTING)
+  ament_add_pytest_test(evaluate_trajectory test/test_evaluate_trajectory.py)
+endif()
+
 # Install launch files.
 #install(DIRECTORY launch config vocabulary
 #  DESTINATION share/${PROJECT_NAME}/)
 
 ament_package()
-

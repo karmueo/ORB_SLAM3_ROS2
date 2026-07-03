@@ -1,11 +1,20 @@
-# Try to find ORB_SLAM3
-# Set alternative paths to search for using ORB_SLAM3_DIR
-# Once done this will define
-# You should ensure your ORB_SLAM3 can run correctly
-#
-# To help the search ORB_SLAM3_ROOT_DIR environment variable as the path to ORB_SLAM3 root folder
-#  e.g. `set( ORB_SLAM3_ROOT_DIR=~/ORB_SLAM3) `
-set(ORB_SLAM3_ROOT_DIR "~/Install/ORB_SLAM/ORB_SLAM3")
+# Try to find ORB_SLAM3.
+# Set ORB_SLAM3_ROOT_DIR with a CMake argument or environment variable.
+# Example:
+#   colcon build --cmake-args -DORB_SLAM3_ROOT_DIR=/home/user/ORB_SLAM3
+
+if(NOT ORB_SLAM3_ROOT_DIR)
+  if(DEFINED ENV{ORB_SLAM3_ROOT_DIR} AND NOT "$ENV{ORB_SLAM3_ROOT_DIR}" STREQUAL "")
+    file(TO_CMAKE_PATH "$ENV{ORB_SLAM3_ROOT_DIR}" ORB_SLAM3_ROOT_DIR)
+  else()
+    message(FATAL_ERROR
+      "ORB_SLAM3_ROOT_DIR is not set.\n"
+      "Pass it with: colcon build --cmake-args -DORB_SLAM3_ROOT_DIR=/path/to/ORB_SLAM3\n"
+      "Or set the environment variable: export ORB_SLAM3_ROOT_DIR=/path/to/ORB_SLAM3")
+  endif()
+endif()
+
+set(ORB_SLAM3_ROOT_DIR "${ORB_SLAM3_ROOT_DIR}" CACHE PATH "ORB_SLAM3 root directory")
 
 # message(${ORB_SLAM3_ROOT_DIR})
 # message(${ORB_SLAM3_ROOT_DIR}/include)
@@ -13,21 +22,26 @@ set(ORB_SLAM3_ROOT_DIR "~/Install/ORB_SLAM/ORB_SLAM3")
 
 # Find ORB_SLAM3
 find_path(ORB_SLAM3_INCLUDE_DIR NAMES System.h
-          PATHS ${ORB_SLAM3_ROOT_DIR}/include)
+          PATHS ${ORB_SLAM3_ROOT_DIR}/include
+          NO_DEFAULT_PATH)
 
 find_library(ORB_SLAM3_LIBRARY NAMES ORB_SLAM3 libORB_SLAM3
-             PATHS ${ORB_SLAM3_ROOT_DIR}/lib)
+             PATHS ${ORB_SLAM3_ROOT_DIR}/lib
+             NO_DEFAULT_PATH)
 
 # Find built-in DBoW2
 find_path(DBoW2_INCLUDE_DIR NAMES Thirdparty/DBoW2/DBoW2/BowVector.h
-          PATHS ${ORB_SLAM3_ROOT_DIR})
+          PATHS ${ORB_SLAM3_ROOT_DIR}
+          NO_DEFAULT_PATH)
 
 find_library(DBoW2_LIBRARY NAMES DBoW2
-             PATHS ${ORB_SLAM3_ROOT_DIR}/Thirdparty/DBoW2/lib)
+             PATHS ${ORB_SLAM3_ROOT_DIR}/Thirdparty/DBoW2/lib
+             NO_DEFAULT_PATH)
 
 # Find built-in g2o
 find_library(g2o_LIBRARY NAMES g2o
-             PATHS ${ORB_SLAM3_ROOT_DIR}/Thirdparty/g2o/lib)
+             PATHS ${ORB_SLAM3_ROOT_DIR}/Thirdparty/g2o/lib
+             NO_DEFAULT_PATH)
 
 
 

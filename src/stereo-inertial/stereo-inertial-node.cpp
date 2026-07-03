@@ -1,16 +1,31 @@
+/**
+ * @file stereo-inertial-node.cpp
+ * @brief 实现双目惯性 ORB_SLAM3 ROS 2 节点的数据缓存、同步和退出收尾逻辑。
+ */
+
 #include "stereo-inertial-node.hpp"
 
 #include <opencv2/core/core.hpp>
 
 using std::placeholders::_1;
 
+/**
+ * @brief 创建双目惯性 SLAM 节点并启动同步线程。
+ * @param SLAM ORB_SLAM3 系统实例指针，生命周期由调用方管理。
+ * @param strSettingsFile 相机和 IMU 配置文件路径。
+ * @param strDoRectify 是否对双目图像做去畸变矫正的字符串开关。
+ * @param strDoEqual 是否对图像做 CLAHE 均衡化的字符串开关。
+ */
 StereoInertialNode::StereoInertialNode(ORB_SLAM3::System *SLAM, const string &strSettingsFile, const string &strDoRectify, const string &strDoEqual) :
     Node("ORB_SLAM3_ROS2"),
-    SLAM_(SLAM)
+    SLAM_(SLAM),
+    stopSync_(false)
 {
+    /** @brief 去畸变矫正开关解析流。 */
     stringstream ss_rec(strDoRectify);
     ss_rec >> boolalpha >> doRectify_;
 
+    /** @brief 均衡化开关解析流。 */
     stringstream ss_eq(strDoEqual);
     ss_eq >> boolalpha >> doEqual_;
 
@@ -20,7 +35,7 @@ StereoInertialNode::StereoInertialNode(ORB_SLAM3::System *SLAM, const string &st
 
     if (doRectify_)
     {
-        // Load settings related to stereo calibration
+        /** @brief 相机配置文件读取器。 */
         cv::FileStorage fsSettings(strSettingsFile, cv::FileStorage::READ);
         if (!fsSettings.isOpened())
         {
@@ -28,6 +43,7 @@ StereoInertialNode::StereoInertialNode(ORB_SLAM3::System *SLAM, const string &st
             assert(0);
         }
 
+        /** @brief 左右目内参、投影、旋转和畸变参数矩阵。 */
         cv::Mat K_l, K_r, P_l, P_r, R_l, R_r, D_l, D_r;
         fsSettings["LEFT.K"] >> K_l;
         fsSettings["RIGHT.K"] >> K_r;
@@ -41,9 +57,13 @@ StereoInertialNode::StereoInertialNode(ORB_SLAM3::System *SLAM, const string &st
         fsSettings["LEFT.D"] >> D_l;
         fsSettings["RIGHT.D"] >> D_r;
 
+        /** @brief 左目图像行数。 */
         int rows_l = fsSettings["LEFT.height"];
+        /** @brief 左目图像列数。 */
         int cols_l = fsSettings["LEFT.width"];
+        /** @brief 右目图像行数。 */
         int rows_r = fsSettings["RIGHT.height"];
+        /** @brief 右目图像列数。 */
         int cols_r = fsSettings["RIGHT.width"];
 
         if (K_l.empty() || K_r.empty() || P_l.empty() || P_r.empty() || R_l.empty() || R_r.empty() || D_l.empty() || D_r.empty() ||
@@ -64,19 +84,27 @@ StereoInertialNode::StereoInertialNode(ORB_SLAM3::System *SLAM, const string &st
     syncThread_ = new std::thread(&StereoInertialNode::SyncWithImu, this);
 }
 
+/**
+ * @brief 停止同步线程，关闭 ORB_SLAM3 并保存关键帧轨迹。
+ */
 StereoInertialNode::~StereoInertialNode()
 {
-    // Delete sync thread
-    syncThread_->join();
+    stopSync_.store(true);
+    if (syncThread_ && syncThread_->joinable())
+    {
+        syncThread_->join();
+    }
     delete syncThread_;
 
-    // Stop all threads
     SLAM_->Shutdown();
 
-    // Save camera trajectory
     SLAM_->SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
 }
 
+/**
+ * @brief 缓存一帧 IMU 消息。
+ * @param msg IMU 消息共享指针。
+ */
 void StereoInertialNode::GrabImu(const ImuMsg::SharedPtr msg)
 {
     bufMutex_.lock();
@@ -84,6 +112,10 @@ void StereoInertialNode::GrabImu(const ImuMsg::SharedPtr msg)
     bufMutex_.unlock();
 }
 
+/**
+ * @brief 缓存一帧左目图像消息。
+ * @param msgLeft 左目图像消息共享指针。
+ */
 void StereoInertialNode::GrabImageLeft(const ImageMsg::SharedPtr msgLeft)
 {
     bufMutexLeft_.lock();
@@ -95,6 +127,10 @@ void StereoInertialNode::GrabImageLeft(const ImageMsg::SharedPtr msgLeft)
     bufMutexLeft_.unlock();
 }
 
+/**
+ * @brief 缓存一帧右目图像消息。
+ * @param msgRight 右目图像消息共享指针。
+ */
 void StereoInertialNode::GrabImageRight(const ImageMsg::SharedPtr msgRight)
 {
     bufMutexRight_.lock();
@@ -106,9 +142,14 @@ void StereoInertialNode::GrabImageRight(const ImageMsg::SharedPtr msgRight)
     bufMutexRight_.unlock();
 }
 
+/**
+ * @brief 将 ROS 图像消息转换为 OpenCV 灰度图。
+ * @param msg 图像消息共享指针。
+ * @return 复制出的 OpenCV 图像矩阵。
+ */
 cv::Mat StereoInertialNode::GetImage(const ImageMsg::SharedPtr msg)
 {
-    // Copy the ros image message to cv::Mat.
+    /** @brief cv_bridge 转换后的只读图像指针。 */
     cv_bridge::CvImageConstPtr cv_ptr;
 
     try
@@ -131,13 +172,19 @@ cv::Mat StereoInertialNode::GetImage(const ImageMsg::SharedPtr msg)
     }
 }
 
+/**
+ * @brief 后台同步左右目图像和 IMU 数据，并调用 ORB_SLAM3 跟踪。
+ */
 void StereoInertialNode::SyncWithImu()
 {
+    /** @brief 左右目图像允许的最大时间差，单位为秒。 */
     const double maxTimeDiff = 0.01;
 
-    while (1)
+    while (!stopSync_.load())
     {
+        /** @brief 当前待处理的左右目图像。 */
         cv::Mat imLeft, imRight;
+        /** @brief 当前待处理左右目图像时间戳，单位为秒。 */
         double tImLeft = 0, tImRight = 0;
         if (!imgLeftBuf_.empty() && !imgRightBuf_.empty() && !imuBuf_.empty())
         {
@@ -178,16 +225,19 @@ void StereoInertialNode::SyncWithImu()
             imgRightBuf_.pop();
             bufMutexRight_.unlock();
 
+            /** @brief 当前图像帧之前的 IMU 测量序列。 */
             vector<ORB_SLAM3::IMU::Point> vImuMeas;
             bufMutex_.lock();
             if (!imuBuf_.empty())
             {
-                // Load imu measurements from buffer
                 vImuMeas.clear();
                 while (!imuBuf_.empty() && Utility::StampToSec(imuBuf_.front()->header.stamp) <= tImLeft)
                 {
+                    /** @brief 当前 IMU 测量时间戳，单位为秒。 */
                     double t = Utility::StampToSec(imuBuf_.front()->header.stamp);
+                    /** @brief 当前 IMU 线加速度测量。 */
                     cv::Point3f acc(imuBuf_.front()->linear_acceleration.x, imuBuf_.front()->linear_acceleration.y, imuBuf_.front()->linear_acceleration.z);
+                    /** @brief 当前 IMU 角速度测量。 */
                     cv::Point3f gyr(imuBuf_.front()->angular_velocity.x, imuBuf_.front()->angular_velocity.y, imuBuf_.front()->angular_velocity.z);
                     vImuMeas.push_back(ORB_SLAM3::IMU::Point(acc, gyr, t));
                     imuBuf_.pop();
@@ -208,9 +258,10 @@ void StereoInertialNode::SyncWithImu()
             }
 
             SLAM_->TrackStereo(imLeft, imRight, tImLeft, vImuMeas);
-
-            std::chrono::milliseconds tSleep(1);
-            std::this_thread::sleep_for(tSleep);
         }
+
+        /** @brief 同步线程轮询间隔，降低空队列时的 CPU 占用并允许快速响应停止标志。 */
+        std::chrono::milliseconds tSleep(1);
+        std::this_thread::sleep_for(tSleep);
     }
 }
