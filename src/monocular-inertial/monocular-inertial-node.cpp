@@ -10,21 +10,38 @@
 
 #include <chrono>
 #include <iostream>
+#include <string>
 
 using std::placeholders::_1;
 
 /**
  * @brief 创建单目惯性 SLAM 节点并启动图像/IMU 同步线程。
  * @param SLAM ORB_SLAM3 系统实例指针，生命周期由调用方管理。
+ * @param settingsFile ORB_SLAM3 配置文件路径，用于读取 IMU 到相机外参。
  */
-MonocularInertialNode::MonocularInertialNode(ORB_SLAM3::System* SLAM) :
+MonocularInertialNode::MonocularInertialNode(ORB_SLAM3::System* SLAM, const std::string& settingsFile) :
     Node("ORB_SLAM3_ROS2"),
     SLAM_(SLAM),
     stopSync_(false),
-    lastImageTimestamp_(-1.0)
+    lastImageTimestamp_(-1.0),
+    Tbc_()
 {
     subImu_ = this->create_subscription<ImuMsg>("imu", 1000, std::bind(&MonocularInertialNode::GrabImu, this, _1));
     subImg_ = this->create_subscription<ImageMsg>("camera", 100, std::bind(&MonocularInertialNode::GrabImage, this, _1));
+    posePub_ = this->create_publisher<PoseStampedMsg>("/orbslam3/body_pose", 10);
+    pathPub_ = this->create_publisher<PathMsg>("/orbslam3/path", 10);
+    pathMsg_.header.frame_id = "map";
+
+    /** @brief 外参读取失败原因。 */
+    std::string errorMessage;
+    if (!LoadBodyToCameraExtrinsic(settingsFile, Tbc_, &errorMessage))
+    {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "Use identity body-camera extrinsic because %s: %s",
+            settingsFile.c_str(),
+            errorMessage.c_str());
+    }
 
     syncThread_ = std::thread(&MonocularInertialNode::SyncWithImu, this);
 }
@@ -179,7 +196,50 @@ void MonocularInertialNode::SyncWithImu()
             continue;
         }
 
-        SLAM_->TrackMonocular(im, tIm, vImuMeas);
+        /** @brief 当前帧世界系到相机系位姿。 */
+        const Sophus::SE3f Tcw = SLAM_->TrackMonocular(im, tIm, vImuMeas);
+        PublishBodyPose(Tcw, imageMsg->header.stamp);
         lastImageTimestamp_ = tIm;
     }
+}
+
+/**
+ * @brief 在跟踪状态有效时发布当前机体系位姿和累计轨迹。
+ * @param Tcw 世界系到相机系位姿。
+ * @param stamp 当前图像时间戳。
+ */
+void MonocularInertialNode::PublishBodyPose(const Sophus::SE3f& Tcw, const builtin_interfaces::msg::Time& stamp)
+{
+    /** @brief ORB_SLAM3 当前跟踪状态。 */
+    const int trackingState = SLAM_->GetTrackingState();
+    if (trackingState != ORB_SLAM3::Tracking::OK && trackingState != ORB_SLAM3::Tracking::OK_KLT)
+    {
+        return;
+    }
+
+    /** @brief 世界系到机体系位姿。 */
+    const Sophus::SE3f Twb = ComputeBodyPoseFromCameraPose(Tcw, Tbc_);
+    /** @brief 世界系到机体系位姿四元数。 */
+    Eigen::Quaternionf quaternion = Twb.unit_quaternion();
+    quaternion.normalize();
+    /** @brief 世界系到机体系平移。 */
+    const Eigen::Vector3f translation = Twb.translation();
+
+    /** @brief 当前帧机体系位姿消息。 */
+    PoseStampedMsg poseMsg;
+    poseMsg.header.stamp = stamp;
+    poseMsg.header.frame_id = "map";
+    poseMsg.pose.position.x = translation.x();
+    poseMsg.pose.position.y = translation.y();
+    poseMsg.pose.position.z = translation.z();
+    poseMsg.pose.orientation.x = quaternion.x();
+    poseMsg.pose.orientation.y = quaternion.y();
+    poseMsg.pose.orientation.z = quaternion.z();
+    poseMsg.pose.orientation.w = quaternion.w();
+
+    posePub_->publish(poseMsg);
+
+    pathMsg_.header.stamp = stamp;
+    pathMsg_.poses.push_back(poseMsg);
+    pathPub_->publish(pathMsg_);
 }

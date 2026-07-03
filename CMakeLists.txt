@@ -15,9 +15,12 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(Eigen REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(Pangolin REQUIRED)
 find_package(ORB_SLAM3 REQUIRED)
@@ -32,6 +35,7 @@ include_directories(
   ${ORB_SLAM3_ROOT_DIR}/include
   ${ORB_SLAM3_ROOT_DIR}/include/CameraModels
   ${ORB_SLAM3_ROOT_DIR}/Thirdparty/Sophus
+  ${EIGEN_INCLUDE_DIR}
 )
 
 link_directories(
@@ -47,8 +51,10 @@ ament_target_dependencies(mono rclcpp sensor_msgs cv_bridge ORB_SLAM3 Pangolin O
 add_executable(monocular-inertial
   src/monocular-inertial/monocular-inertial.cpp
   src/monocular-inertial/monocular-inertial-node.cpp
+  src/monocular-inertial/monocular-inertial-pose.cpp
 )
-ament_target_dependencies(monocular-inertial rclcpp sensor_msgs cv_bridge ORB_SLAM3 Pangolin OpenCV)
+target_include_directories(monocular-inertial PRIVATE src/monocular-inertial)
+ament_target_dependencies(monocular-inertial rclcpp sensor_msgs geometry_msgs nav_msgs cv_bridge ORB_SLAM3 Pangolin OpenCV)
 
 add_executable(rgbd
   src/rgbd/rgbd.cpp
@@ -89,6 +95,11 @@ if(BUILD_TESTING)
   if(TARGET test_rgbd_raw_data_converter)
     target_include_directories(test_rgbd_raw_data_converter PRIVATE src/rgbd)
     ament_target_dependencies(test_rgbd_raw_data_converter sensor_msgs)
+  endif()
+  ament_add_gtest(test_monocular_inertial_pose test/test_monocular_inertial_pose.cpp src/monocular-inertial/monocular-inertial-pose.cpp)
+  if(TARGET test_monocular_inertial_pose)
+    target_include_directories(test_monocular_inertial_pose PRIVATE src/monocular-inertial)
+    ament_target_dependencies(test_monocular_inertial_pose ORB_SLAM3 OpenCV)
   endif()
 endif()
 

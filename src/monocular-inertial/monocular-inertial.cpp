@@ -38,7 +38,7 @@ int main(int argc, char** argv)
 
     {
         /** @brief ROS 2 单目惯性节点，作用域结束时先于 ROS shutdown 释放。 */
-        auto node = std::make_shared<MonocularInertialNode>(&SLAM);
+        auto node = std::make_shared<MonocularInertialNode>(&SLAM, argv[2]);
         std::cout << "============================" << std::endl;
         std::cout << "Monocular-Inertial" << std::endl;
 

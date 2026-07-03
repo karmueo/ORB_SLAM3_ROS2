@@ -8,6 +8,8 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/image_encodings.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "nav_msgs/msg/path.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/imu.hpp"
 
@@ -18,6 +20,7 @@
 #include "System.h"
 #include "Tracking.h"
 
+#include "monocular-inertial-pose.hpp"
 #include "utility.hpp"
 
 #include <atomic>
@@ -30,6 +33,10 @@
 using ImuMsg = sensor_msgs::msg::Imu;
 /** @brief ROS 2 图像消息类型别名。 */
 using ImageMsg = sensor_msgs::msg::Image;
+/** @brief ROS 2 位姿消息类型别名。 */
+using PoseStampedMsg = geometry_msgs::msg::PoseStamped;
+/** @brief ROS 2 轨迹消息类型别名。 */
+using PathMsg = nav_msgs::msg::Path;
 
 /**
  * @brief 单目惯性 SLAM 节点。
@@ -43,8 +50,9 @@ public:
     /**
      * @brief 创建单目惯性 SLAM 节点并启动图像/IMU 同步线程。
      * @param pSLAM ORB_SLAM3 系统实例指针，生命周期由调用方管理。
+     * @param settingsFile ORB_SLAM3 配置文件路径，用于读取 IMU 到相机外参。
      */
-    explicit MonocularInertialNode(ORB_SLAM3::System* pSLAM);
+    MonocularInertialNode(ORB_SLAM3::System* pSLAM, const std::string& settingsFile);
 
     /**
      * @brief 停止同步线程，关闭 ORB_SLAM3 并保存关键帧轨迹。
@@ -76,10 +84,21 @@ private:
      */
     void SyncWithImu();
 
+    /**
+     * @brief 在跟踪状态有效时发布当前机体系位姿和累计轨迹。
+     * @param Tcw 世界系到相机系位姿。
+     * @param stamp 当前图像时间戳。
+     */
+    void PublishBodyPose(const Sophus::SE3f& Tcw, const builtin_interfaces::msg::Time& stamp);
+
     /** @brief IMU 订阅器。 */
     rclcpp::Subscription<ImuMsg>::SharedPtr subImu_;
     /** @brief 单目图像订阅器。 */
     rclcpp::Subscription<ImageMsg>::SharedPtr subImg_;
+    /** @brief 机体系实时位姿发布器。 */
+    rclcpp::Publisher<PoseStampedMsg>::SharedPtr posePub_;
+    /** @brief 机体系累计轨迹发布器。 */
+    rclcpp::Publisher<PathMsg>::SharedPtr pathPub_;
 
     /** @brief ORB_SLAM3 系统实例指针，节点不拥有其生命周期。 */
     ORB_SLAM3::System* SLAM_;
@@ -99,6 +118,10 @@ private:
     std::mutex imgMutex_;
     /** @brief 最近一次送入 ORB_SLAM3 的图像时间戳，用于丢弃回跳帧。 */
     double lastImageTimestamp_;
+    /** @brief 机体系到相机系外参，对应 ORB_SLAM3 配置中的 IMU.T_b_c1 或 Tbc。 */
+    Sophus::SE3f Tbc_;
+    /** @brief 累计发布的机体系轨迹。 */
+    PathMsg pathMsg_;
 };
 
 #endif

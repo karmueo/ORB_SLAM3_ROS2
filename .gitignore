@@ -13,3 +13,5 @@ KeyFrameTrajectory.txt
 /Makefile
 /Testing/
 *ate.json
+__pycache__/
+*.pyc
