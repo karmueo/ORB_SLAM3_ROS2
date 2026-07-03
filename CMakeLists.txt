@@ -43,6 +43,12 @@ add_executable(mono
 )
 ament_target_dependencies(mono rclcpp sensor_msgs cv_bridge ORB_SLAM3 Pangolin OpenCV)
 
+add_executable(monocular-inertial
+  src/monocular-inertial/monocular-inertial.cpp
+  src/monocular-inertial/monocular-inertial-node.cpp
+)
+ament_target_dependencies(monocular-inertial rclcpp sensor_msgs cv_bridge ORB_SLAM3 Pangolin OpenCV)
+
 add_executable(rgbd
   src/rgbd/rgbd.cpp
   src/rgbd/rgbd-slam-node.cpp
@@ -61,7 +67,7 @@ add_executable(stereo-inertial
 )
 ament_target_dependencies(stereo-inertial rclcpp sensor_msgs cv_bridge ORB_SLAM3 Pangolin OpenCV)
 
-install(TARGETS mono rgbd stereo stereo-inertial DESTINATION lib/${PROJECT_NAME})
+install(TARGETS mono monocular-inertial rgbd stereo stereo-inertial DESTINATION lib/${PROJECT_NAME})
 
 install(PROGRAMS scripts/evaluate_trajectory.py
   DESTINATION lib/${PROJECT_NAME}

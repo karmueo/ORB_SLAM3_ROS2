@@ -1,0 +1,77 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# OpenLORIS Cafe T265 monocular-inertial configuration.
+# This file uses only /t265/fisheye1/image_raw and /t265/imu.
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+Camera.type: "KannalaBrandt8"
+
+# T265 fisheye1 calibration from OpenLORIS cafe1-1_vins_calib/t265_fisheye1_kb.yaml.
+Camera1.fx: 284.98089599609375
+Camera1.fy: 286.1023864746094
+Camera1.cx: 425.244384765625
+Camera1.cy: 398.46759033203125
+
+# Kannala-Brandt distortion parameters from t265_fisheye1_kb.yaml.
+Camera1.k1: -0.007304710801690817
+Camera1.k2: 0.04349993169307709
+Camera1.k3: -0.04128304123878479
+Camera1.k4: 0.007652460131794214
+
+# Camera resolution.
+Camera.width: 848
+Camera.height: 800
+
+# T265 fisheye stream rate in the OpenLORIS Cafe bag.
+Camera.fps: 30
+
+# Color order of the images (0: BGR, 1: RGB. It is ignored for grayscale images).
+Camera.RGB: 1
+
+# Transformation from body-frame (T265 IMU) to camera-frame (fisheye1).
+# Source: OpenLORIS /tf_static derived body_T_cam0 used by the local VINS-Fusion OpenLORIS config.
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [-0.99992647754574338, -0.0049039235528669338, 0.011103301391137518, 0.010699211897572041,
+          0.0049341286574481917, -0.99998434272813452, 0.0026946143436078424, -5.2795162310329699e-05,
+          0.011089911739348873, 0.0027492009487604849, 0.99993472575028397, -0.00011866201086316215,
+          0.0, 0.0, 0.0, 1.0]
+
+# Do not insert KFs when recently lost.
+IMU.InsertKFsWhenLost: 0
+
+# IMU noise currently follows the ORB_SLAM3 RealSense T265 example.
+# TODO: Replace these values with measured OpenLORIS/T265 noise parameters before accuracy evaluation.
+IMU.NoiseGyro: 0.000005148030141
+IMU.NoiseAcc: 0.000066952452471
+IMU.GyroWalk: 0.000000499999999
+IMU.AccWalk: 0.000099999997474
+IMU.Frequency: 200.0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters.
+#--------------------------------------------------------------------------------------------
+ORBextractor.nFeatures: 800
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters.
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0
+Viewer.imageViewScale: 2.0
