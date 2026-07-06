@@ -52,6 +52,7 @@ add_executable(monocular-inertial
   src/monocular-inertial/monocular-inertial.cpp
   src/monocular-inertial/monocular-inertial-node.cpp
   src/monocular-inertial/monocular-inertial-pose.cpp
+  src/monocular-inertial/monocular-inertial-sync.cpp
 )
 target_include_directories(monocular-inertial PRIVATE src/monocular-inertial)
 ament_target_dependencies(monocular-inertial rclcpp sensor_msgs geometry_msgs nav_msgs cv_bridge ORB_SLAM3 Pangolin OpenCV)
@@ -100,6 +101,11 @@ if(BUILD_TESTING)
   if(TARGET test_monocular_inertial_pose)
     target_include_directories(test_monocular_inertial_pose PRIVATE src/monocular-inertial)
     ament_target_dependencies(test_monocular_inertial_pose ORB_SLAM3 OpenCV)
+  endif()
+  ament_add_gtest(test_monocular_inertial_sync test/test_monocular_inertial_sync.cpp src/monocular-inertial/monocular-inertial-sync.cpp)
+  if(TARGET test_monocular_inertial_sync)
+    target_include_directories(test_monocular_inertial_sync PRIVATE src/monocular-inertial)
+    ament_target_dependencies(test_monocular_inertial_sync rclcpp sensor_msgs ORB_SLAM3 OpenCV)
   endif()
 endif()
 

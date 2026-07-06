@@ -21,9 +21,11 @@
 #include "Tracking.h"
 
 #include "monocular-inertial-pose.hpp"
+#include "monocular-inertial-sync.hpp"
 #include "utility.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -116,8 +118,22 @@ private:
     std::queue<ImageMsg::SharedPtr> imgBuf_;
     /** @brief 图像缓存队列互斥锁。 */
     std::mutex imgMutex_;
-    /** @brief 最近一次送入 ORB_SLAM3 的图像时间戳，用于丢弃回跳帧。 */
+    /** @brief 图像缓存队列最大容量，防止跟踪线程落后时内存持续增长。 */
+    std::size_t maxImageQueueSize_;
+    /** @brief 最近一次处理的图像时间戳，用于丢弃回跳帧。 */
     double lastImageTimestamp_;
+    /** @brief 最近一次接收的 IMU 时间戳，用于过滤回跳样本。 */
+    double lastImuTimestamp_;
+    /** @brief 已接收图像帧数量。 */
+    std::atomic<std::uint64_t> receivedImageCount_;
+    /** @brief 已送入 ORB_SLAM3 跟踪的图像帧数量。 */
+    std::atomic<std::uint64_t> trackedImageCount_;
+    /** @brief 因队列溢出、时间戳回跳或转换失败丢弃的图像帧数量。 */
+    std::atomic<std::uint64_t> droppedImageCount_;
+    /** @brief 因 IMU 时间戳回跳或重复被过滤的 IMU 样本数量。 */
+    std::atomic<std::uint64_t> droppedImuCount_;
+    /** @brief 因 IMU 尚未覆盖图像时间戳而等待的次数。 */
+    std::atomic<std::uint64_t> imuWaitCount_;
     /** @brief 机体系到相机系外参，对应 ORB_SLAM3 配置中的 IMU.T_b_c1 或 Tbc。 */
     Sophus::SE3f Tbc_;
     /** @brief 累计发布的机体系轨迹。 */
