@@ -37,7 +37,7 @@ Camera.newWidth: 960
 # ORB-SLAM3 内部处理图像高度，单位为像素；保持与原图相同宽高比，内部会同步缩放相机内参。
 Camera.newHeight: 960
 # 图像帧率，单位为 Hz；ORB-SLAM3 新版 Settings 解析要求该字段为整数。
-Camera.fps: 44
+Camera.fps: 50
 
 # 图像颜色通道顺序标志；当前 /rgb/image 使用 bgr8 编码，因此填写 0。
 Camera.RGB: 0

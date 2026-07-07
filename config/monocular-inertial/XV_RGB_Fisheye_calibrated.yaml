@@ -32,8 +32,12 @@ Camera1.k4: 0.00035743420516503726
 Camera.width: 1280
 # 图像高度，单位为像素；与 Kalibr resolution 和 XV RGB 图像输出一致。
 Camera.height: 1280
+# ORB-SLAM3 内部处理图像宽度，单位为像素；用于降低 1280x1280 输入的实时计算负载。
+Camera.newWidth: 640
+# ORB-SLAM3 内部处理图像高度，单位为像素；保持与原图相同宽高比，内部会同步缩放相机内参。
+Camera.newHeight: 640
 # 图像帧率，单位为 Hz；ORB-SLAM3 新版 Settings 解析要求该字段为整数。
-Camera.fps: 47
+Camera.fps: 60
 
 # 图像颜色通道顺序标志；当前 /rgb/image 使用 bgr8 编码，因此填写 0。
 Camera.RGB: 0
@@ -65,7 +69,7 @@ IMU.GyroWalk: 4.905584115261025e-06
 # 加速度计随机游走，单位按 ORB-SLAM3/Kalibr IMU 模型使用；来自 Allan accelerometer_random_walk。
 IMU.AccWalk: 0.0003604781951727939
 # IMU 发布频率，单位为 Hz；来自 /xv_sdk/SN250801DR48FB26001253/imu 的实测平均频率。
-IMU.Frequency: 493.2
+IMU.Frequency: 493.3
 
 #--------------------------------------------------------------------------------------------
 # ORB Parameters.

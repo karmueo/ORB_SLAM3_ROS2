@@ -36,11 +36,23 @@ Camera.height: 1280
 Camera.newWidth: 960
 # ORB-SLAM3 内部处理图像高度，单位为像素；保持与原图相同宽高比，内部会同步缩放相机内参。
 Camera.newHeight: 960
-# 图像帧率，单位为 Hz；bag4 轻量包实测图像中位频率约为 60Hz。
-Camera.fps: 60
+# 图像帧率，单位为 Hz；稳定性优先配置按 30Hz 送入 ORB-SLAM3。
+Camera.fps: 30
 
 # 图像颜色通道顺序标志；当前 /rgb/image 使用 bgr8 编码，因此填写 0。
 Camera.RGB: 0
+
+#--------------------------------------------------------------------------------------------
+# ROS wrapper Parameters.
+#--------------------------------------------------------------------------------------------
+# ROS wrapper 主动送入 ORB-SLAM3 的目标图像帧率，单位为 Hz；用于减轻实时处理压力。
+ROS.TargetFps: 30
+# ROS wrapper 图像缓存队列上限，防止播放速度高于处理速度时内存持续增长。
+ROS.MaxImageQueueSize: 100
+# IMU 时间戳固定偏移，单位为秒；调参时可测试 -0.02、-0.01、0、0.01、0.02。
+ROS.ImuTimeOffsetSec: 0.0
+# IMU 小窗口重排长度，单位为秒；用于吸收 bag 中少量 header 时间戳轻微回跳样本。
+ROS.ImuReorderWindowSec: 0.01
 
 # 机体系（IMU）到相机系的外参。
 # Kalibr 输出 T_cam_imu 表示 imu0 到 cam0，语义与 IMU.T_b_c1 一致，直接写入。
@@ -74,16 +86,16 @@ IMU.Frequency: 493.2
 #--------------------------------------------------------------------------------------------
 # ORB Parameters.
 #--------------------------------------------------------------------------------------------
-# 每帧提取的 ORB 特征点数量；保持 800 以减少特征提取和匹配开销。
-ORBextractor.nFeatures: 800
+# 每帧提取的 ORB 特征点数量；提高到 1200 以增强单目惯性初始化期间的视觉跟踪稳定性。
+ORBextractor.nFeatures: 1200
 # 图像金字塔相邻层缩放因子；当前保持 ORB-SLAM3 常用值 1.2。
 ORBextractor.scaleFactor: 1.2
 # 图像金字塔层数；当前保持模板值 8。
 ORBextractor.nLevels: 8
-# FAST 初始阈值；提高阈值可减少弱角点数量并降低计算压力。
-ORBextractor.iniThFAST: 25
-# FAST 最小阈值；初始阈值提取不足时使用该阈值补充特征。
-ORBextractor.minThFAST: 10
+# FAST 初始阈值；使用 ORB-SLAM3 常用值提高弱纹理场景下的特征保留能力。
+ORBextractor.iniThFAST: 20
+# FAST 最小阈值；初始阈值提取不足时用较低阈值补充特征。
+ORBextractor.minThFAST: 7
 
 #--------------------------------------------------------------------------------------------
 # Viewer Parameters.
