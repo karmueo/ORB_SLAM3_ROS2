@@ -90,8 +90,9 @@ private:
      * @brief 在跟踪状态有效时发布当前机体系位姿和累计轨迹。
      * @param Tcw 世界系到相机系位姿。
      * @param stamp 当前图像时间戳。
+     * @return 当前帧成功发布机体系位姿时返回 true。
      */
-    void PublishBodyPose(const Sophus::SE3f& Tcw, const builtin_interfaces::msg::Time& stamp);
+    bool PublishBodyPose(const Sophus::SE3f& Tcw, const builtin_interfaces::msg::Time& stamp);
 
     /** @brief IMU 订阅器。 */
     rclcpp::Subscription<ImuMsg>::SharedPtr subImu_;
@@ -120,20 +121,38 @@ private:
     std::mutex imgMutex_;
     /** @brief 图像缓存队列最大容量，防止跟踪线程落后时内存持续增长。 */
     std::size_t maxImageQueueSize_;
+    /** @brief ROS wrapper 主动送入 SLAM 的目标图像帧率，单位 Hz；小于等于 0 时关闭限帧。 */
+    double targetImageFps_;
+    /** @brief 图像平均帧率限制状态，用于避免固定间隔限帧在略高输入帧率下退化。 */
+    MonocularImageRateLimitState imageRateLimitState_;
     /** @brief 最近一次处理的图像时间戳，用于丢弃回跳帧。 */
     double lastImageTimestamp_;
     /** @brief 最近一次接收的 IMU 时间戳，用于过滤回跳样本。 */
     double lastImuTimestamp_;
+    /** @brief 应用于 IMU 消息时间戳的固定偏移量，单位为秒。 */
+    double imuTimeOffsetSec_;
+    /** @brief IMU 小窗口重排长度，单位为秒；小于等于 0 时关闭重排。 */
+    double imuReorderWindowSec_;
+    /** @brief IMU 小窗口重排状态，用于缓存尚未越过窗口的样本。 */
+    MonocularImuReorderState imuReorderState_;
     /** @brief 已接收图像帧数量。 */
     std::atomic<std::uint64_t> receivedImageCount_;
     /** @brief 已送入 ORB_SLAM3 跟踪的图像帧数量。 */
     std::atomic<std::uint64_t> trackedImageCount_;
     /** @brief 因队列溢出、时间戳回跳或转换失败丢弃的图像帧数量。 */
     std::atomic<std::uint64_t> droppedImageCount_;
+    /** @brief 因 ROS wrapper 主动限帧被丢弃的图像帧数量。 */
+    std::atomic<std::uint64_t> rateLimitedImageCount_;
+    /** @brief 因图像队列达到容量上限被丢弃的最旧图像帧数量。 */
+    std::atomic<std::uint64_t> queueOverflowDroppedImageCount_;
     /** @brief 因 IMU 时间戳回跳或重复被过滤的 IMU 样本数量。 */
     std::atomic<std::uint64_t> droppedImuCount_;
+    /** @brief 经过时间偏移和小窗口重排后进入主 IMU 队列的样本数量。 */
+    std::atomic<std::uint64_t> queuedImuCount_;
     /** @brief 因 IMU 尚未覆盖图像时间戳而等待的次数。 */
     std::atomic<std::uint64_t> imuWaitCount_;
+    /** @brief 已成功发布的机体系位姿数量。 */
+    std::atomic<std::uint64_t> posePublishCount_;
     /** @brief 机体系到相机系外参，对应 ORB_SLAM3 配置中的 IMU.T_b_c1 或 Tbc。 */
     Sophus::SE3f Tbc_;
     /** @brief 累计发布的机体系轨迹。 */

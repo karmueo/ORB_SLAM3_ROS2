@@ -24,13 +24,22 @@ MonocularInertialNode::MonocularInertialNode(ORB_SLAM3::System* SLAM, const std:
     SLAM_(SLAM),
     stopSync_(false),
     maxImageQueueSize_(100U),
+    targetImageFps_(0.0),
+    imageRateLimitState_{-1.0, 0.0, -1.0},
     lastImageTimestamp_(-1.0),
     lastImuTimestamp_(-1.0),
+    imuTimeOffsetSec_(0.0),
+    imuReorderWindowSec_(0.0),
+    imuReorderState_(),
     receivedImageCount_(0U),
     trackedImageCount_(0U),
     droppedImageCount_(0U),
+    rateLimitedImageCount_(0U),
+    queueOverflowDroppedImageCount_(0U),
     droppedImuCount_(0U),
+    queuedImuCount_(0U),
     imuWaitCount_(0U),
+    posePublishCount_(0U),
     Tbc_()
 {
     subImu_ = this->create_subscription<ImuMsg>("imu", 1000, std::bind(&MonocularInertialNode::GrabImu, this, _1));
@@ -49,6 +58,77 @@ MonocularInertialNode::MonocularInertialNode(ORB_SLAM3::System* SLAM, const std:
             settingsFile.c_str(),
             errorMessage.c_str());
     }
+
+    /** @brief ORB_SLAM3 配置文件读取器，用于加载 ROS wrapper 可选参数。 */
+    cv::FileStorage fsSettings(settingsFile, cv::FileStorage::READ);
+    if (fsSettings.isOpened())
+    {
+        /** @brief ROS wrapper 目标图像帧率配置节点。 */
+        const cv::FileNode targetFpsNode = fsSettings["ROS.TargetFps"];
+        if (!targetFpsNode.empty())
+        {
+            targetImageFps_ = static_cast<double>(targetFpsNode);
+        }
+
+        /** @brief ROS wrapper 图像队列容量配置节点。 */
+        const cv::FileNode maxImageQueueNode = fsSettings["ROS.MaxImageQueueSize"];
+        if (!maxImageQueueNode.empty())
+        {
+            /** @brief 配置文件中读取到的图像队列容量。 */
+            const int configuredQueueSize = static_cast<int>(maxImageQueueNode);
+            if (configuredQueueSize > 0)
+            {
+                maxImageQueueSize_ = static_cast<std::size_t>(configuredQueueSize);
+            }
+            else
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "Ignore invalid ROS.MaxImageQueueSize=%d, keep default %zu",
+                    configuredQueueSize,
+                    maxImageQueueSize_);
+            }
+        }
+
+        /** @brief ROS wrapper IMU 时间戳固定偏移配置节点。 */
+        const cv::FileNode imuTimeOffsetNode = fsSettings["ROS.ImuTimeOffsetSec"];
+        if (!imuTimeOffsetNode.empty())
+        {
+            imuTimeOffsetSec_ = static_cast<double>(imuTimeOffsetNode);
+        }
+
+        /** @brief ROS wrapper IMU 小窗口重排长度配置节点。 */
+        const cv::FileNode imuReorderWindowNode = fsSettings["ROS.ImuReorderWindowSec"];
+        if (!imuReorderWindowNode.empty())
+        {
+            /** @brief 配置文件中读取到的 IMU 小窗口重排长度，单位为秒。 */
+            const double configuredReorderWindowSec = static_cast<double>(imuReorderWindowNode);
+            if (configuredReorderWindowSec >= 0.0)
+            {
+                imuReorderWindowSec_ = configuredReorderWindowSec;
+            }
+            else
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "Ignore invalid ROS.ImuReorderWindowSec=%.6f, keep default %.6f",
+                    configuredReorderWindowSec,
+                    imuReorderWindowSec_);
+            }
+        }
+    }
+    else
+    {
+        RCLCPP_WARN(this->get_logger(), "Cannot open settings file for ROS wrapper options: %s", settingsFile.c_str());
+    }
+
+    RCLCPP_INFO(
+        this->get_logger(),
+        "单目惯性 ROS wrapper 配置：TargetFps=%.2f，MaxImageQueueSize=%zu，ImuTimeOffsetSec=%.6f，ImuReorderWindowSec=%.6f",
+        targetImageFps_,
+        maxImageQueueSize_,
+        imuTimeOffsetSec_,
+        imuReorderWindowSec_);
 
     syncThread_ = std::thread(&MonocularInertialNode::SyncWithImu, this);
 }
@@ -79,22 +159,27 @@ void MonocularInertialNode::GrabImu(const ImuMsg::SharedPtr msg)
     std::lock_guard<std::mutex> lock(imuMutex_);
     /** @brief 当前调用前被过滤的 IMU 样本数量。 */
     std::uint64_t droppedImuCount = droppedImuCount_.load();
-    /** @brief 当前 IMU 样本是否成功入队。 */
-    const bool accepted = MonocularInertialSync::PushMonotonicImu(
+    /** @brief 当前 IMU 样本入队统计。 */
+    const MonocularImuQueuePushResult pushResult = MonocularInertialSync::PushReorderedImu(
         imuBuf_,
         msg,
+        imuTimeOffsetSec_,
+        imuReorderWindowSec_,
+        &imuReorderState_,
         &lastImuTimestamp_,
         &droppedImuCount);
+    queuedImuCount_.fetch_add(pushResult.acceptedCount);
     droppedImuCount_.store(droppedImuCount);
-    if (!accepted)
+    if (pushResult.droppedCount > 0U)
     {
         RCLCPP_WARN_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             5000,
-            "过滤 IMU 回跳或重复时间戳样本，累计过滤=%lu，当前队列长度=%zu",
+            "过滤 IMU 回跳或重复时间戳样本，累计过滤=%lu，当前队列长度=%zu，重排等待=%zu",
             droppedImuCount_.load(),
-            imuBuf_.size());
+            imuBuf_.size(),
+            pushResult.pendingCount);
     }
 }
 
@@ -107,23 +192,42 @@ void MonocularInertialNode::GrabImage(const ImageMsg::SharedPtr msg)
     /** @brief 图像队列锁，保护图像数据入队。 */
     std::lock_guard<std::mutex> lock(imgMutex_);
     ++receivedImageCount_;
-    /** @brief 当前调用前被丢弃的图像数量。 */
-    std::uint64_t droppedImageCount = droppedImageCount_.load();
-    /** @brief 当前图像入队是否导致最旧图像被丢弃。 */
-    const bool droppedOldestImage = MonocularInertialSync::PushBoundedImage(
+    /** @brief 当前调用前因限帧被丢弃的图像数量。 */
+    std::uint64_t rateLimitedImageCount = rateLimitedImageCount_.load();
+    /** @brief 当前调用前因队列溢出被丢弃的图像数量。 */
+    std::uint64_t queueOverflowDroppedImageCount = queueOverflowDroppedImageCount_.load();
+    /** @brief 当前图像入队结果。 */
+    const MonocularImageQueuePushResult pushResult = MonocularInertialSync::PushRateLimitedBoundedImage(
         imgBuf_,
         msg,
         maxImageQueueSize_,
-        &droppedImageCount);
-    droppedImageCount_.store(droppedImageCount);
-    if (droppedOldestImage)
+        targetImageFps_,
+        &imageRateLimitState_,
+        &rateLimitedImageCount,
+        &queueOverflowDroppedImageCount);
+    rateLimitedImageCount_.store(rateLimitedImageCount);
+    queueOverflowDroppedImageCount_.store(queueOverflowDroppedImageCount);
+    if (pushResult.droppedByRateLimit)
     {
+        ++droppedImageCount_;
         RCLCPP_WARN_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             5000,
-            "图像队列超过上限，已丢弃最旧帧，累计丢弃=%lu，队列长度=%zu",
-            droppedImageCount_.load(),
+            "按目标帧率丢弃图像，累计限帧丢弃=%lu，目标帧率=%.2fHz，队列长度=%zu",
+            rateLimitedImageCount_.load(),
+            targetImageFps_,
+            imgBuf_.size());
+    }
+    if (pushResult.droppedOldestImage)
+    {
+        ++droppedImageCount_;
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            5000,
+            "图像队列超过上限，已丢弃最旧帧，累计队列溢出丢弃=%lu，队列长度=%zu",
+            queueOverflowDroppedImageCount_.load(),
             imgBuf_.size());
     }
 }
@@ -226,6 +330,33 @@ void MonocularInertialNode::SyncWithImu()
             imuQueueSize = imuBuf_.size();
             if (!MonocularInertialSync::HasImuCoverageForImage(imuBuf_, tIm))
             {
+                /** @brief 当前调用前被过滤的 IMU 样本数量。 */
+                std::uint64_t droppedImuCount = droppedImuCount_.load();
+                /** @brief 为当前图像从 IMU 重排缓存中提前刷出的样本统计。 */
+                const MonocularImuQueuePushResult flushResult =
+                    MonocularInertialSync::FlushPendingReorderedImuUntilCovered(
+                        imuBuf_,
+                        &imuReorderState_,
+                        tIm,
+                        &lastImuTimestamp_,
+                        &droppedImuCount);
+                queuedImuCount_.fetch_add(flushResult.acceptedCount);
+                droppedImuCount_.store(droppedImuCount);
+                imuQueueSize = imuBuf_.size();
+                if (flushResult.droppedCount > 0U)
+                {
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        5000,
+                        "刷新 IMU 重排缓存时过滤回跳或重复样本，累计过滤=%lu，当前队列长度=%zu，重排等待=%zu",
+                        droppedImuCount_.load(),
+                        imuQueueSize,
+                        flushResult.pendingCount);
+                }
+            }
+            if (!MonocularInertialSync::HasImuCoverageForImage(imuBuf_, tIm))
+            {
                 ++imuWaitCount_;
                 RCLCPP_WARN_THROTTLE(
                     this->get_logger(),
@@ -263,11 +394,18 @@ void MonocularInertialNode::SyncWithImu()
 
         /** @brief 当前图像帧之前的 IMU 测量序列。 */
         std::vector<ORB_SLAM3::IMU::Point> vImuMeas;
+        /** @brief 当前图像帧对应 IMU 序列的首个时间戳，单位为秒。 */
+        double firstImuTimestamp = -1.0;
+        /** @brief 当前图像帧对应 IMU 序列的末尾时间戳，单位为秒。 */
+        double lastFrameImuTimestamp = -1.0;
+        /** @brief 当前 IMU 小窗口重排缓存中的待输出样本数量。 */
+        std::size_t imuReorderPendingCount = 0U;
         {
             /** @brief IMU 队列锁，保护按图像时间戳取出 IMU 数据。 */
             std::lock_guard<std::mutex> lock(imuMutex_);
             vImuMeas = MonocularInertialSync::ExtractImuMeasurementsUntil(imuBuf_, tIm);
             imuQueueSize = imuBuf_.size();
+            imuReorderPendingCount = imuReorderState_.pendingImuMsgs.size();
         }
 
         if (!MonocularInertialSync::HasEnoughMeasurementsForPreintegration(vImuMeas))
@@ -284,6 +422,8 @@ void MonocularInertialNode::SyncWithImu()
                 droppedImageCount_.load());
             continue;
         }
+        firstImuTimestamp = vImuMeas.front().t;
+        lastFrameImuTimestamp = vImuMeas.back().t;
 
         /** @brief 当前待跟踪图像矩阵。 */
         cv::Mat im = GetImage(imageMsg);
@@ -303,21 +443,59 @@ void MonocularInertialNode::SyncWithImu()
         const std::chrono::steady_clock::time_point trackEnd = std::chrono::steady_clock::now();
         /** @brief 单帧跟踪耗时，单位为毫秒。 */
         const double trackDurationMs = std::chrono::duration<double, std::milli>(trackEnd - trackStart).count();
-        PublishBodyPose(Tcw, imageMsg->header.stamp);
+        /** @brief ORB_SLAM3 当前跟踪状态。 */
+        const int trackingState = SLAM_->GetTrackingState();
+        /** @brief 当前帧是否发布了机体系位姿。 */
+        const bool posePublished = PublishBodyPose(Tcw, imageMsg->header.stamp);
         lastImageTimestamp_ = tIm;
         ++trackedImageCount_;
+        /** @brief 当前累计接收的图像数量。 */
+        const std::uint64_t receivedImageCount = receivedImageCount_.load();
+        /** @brief 当前累计送入跟踪的图像数量。 */
+        const std::uint64_t trackedImageCount = trackedImageCount_.load();
+        /** @brief 当前累计因限帧丢弃的图像数量。 */
+        const std::uint64_t rateLimitedImageCount = rateLimitedImageCount_.load();
+        /** @brief 当前累计通过限帧并进入图像队列的图像数量。 */
+        const std::uint64_t acceptedAfterRateLimitCount = receivedImageCount - rateLimitedImageCount;
+        /** @brief 跟踪图像占接收图像的比例，用于观察实际处理帧率。 */
+        const double trackedToReceivedRatio =
+            receivedImageCount > 0U ? static_cast<double>(trackedImageCount) / static_cast<double>(receivedImageCount) : 0.0;
+        /** @brief 跟踪图像占限帧后入队图像的比例，用于观察队列溢出和等待 IMU 的影响。 */
+        const double trackedToAcceptedRatio = acceptedAfterRateLimitCount > 0U
+                                                  ? static_cast<double>(trackedImageCount) / static_cast<double>(acceptedAfterRateLimitCount)
+                                                  : 0.0;
+        /** @brief 当前累计发布的机体系位姿数量。 */
+        const std::uint64_t posePublishCount = posePublishCount_.load();
+        RCLCPP_INFO(
+            this->get_logger(),
+            "单目惯性帧诊断：tracking_state=%d，image_t=%.9f，imu_count=%zu，imu_first=%.9f，imu_last=%.9f，pose_published=%d，pose_publish_count=%lu，track_time=%.2fms",
+            trackingState,
+            tIm,
+            vImuMeas.size(),
+            firstImuTimestamp,
+            lastFrameImuTimestamp,
+            posePublished ? 1 : 0,
+            posePublishCount,
+            trackDurationMs);
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             5000,
-            "单目惯性统计：接收图像=%lu，跟踪图像=%lu，丢弃图像=%lu，过滤IMU=%lu，等待IMU=%lu，图像队列=%zu，IMU队列=%zu，最近跟踪耗时=%.2fms",
-            receivedImageCount_.load(),
-            trackedImageCount_.load(),
+            "单目惯性统计：接收图像=%lu，限帧后入队=%lu，跟踪图像=%lu，跟踪/接收=%.3f，跟踪/限帧后=%.3f，丢弃图像=%lu，限帧丢弃=%lu，队列溢出丢弃=%lu，入队IMU=%lu，过滤IMU=%lu，等待IMU=%lu，图像队列=%zu，IMU队列=%zu，IMU重排等待=%zu，最近跟踪耗时=%.2fms",
+            receivedImageCount,
+            acceptedAfterRateLimitCount,
+            trackedImageCount,
+            trackedToReceivedRatio,
+            trackedToAcceptedRatio,
             droppedImageCount_.load(),
+            rateLimitedImageCount,
+            queueOverflowDroppedImageCount_.load(),
+            queuedImuCount_.load(),
             droppedImuCount_.load(),
             imuWaitCount_.load(),
             imageQueueSize,
             imuQueueSize,
+            imuReorderPendingCount,
             trackDurationMs);
     }
 }
@@ -326,14 +504,15 @@ void MonocularInertialNode::SyncWithImu()
  * @brief 在跟踪状态有效时发布当前机体系位姿和累计轨迹。
  * @param Tcw 世界系到相机系位姿。
  * @param stamp 当前图像时间戳。
+ * @return 当前帧成功发布机体系位姿时返回 true。
  */
-void MonocularInertialNode::PublishBodyPose(const Sophus::SE3f& Tcw, const builtin_interfaces::msg::Time& stamp)
+bool MonocularInertialNode::PublishBodyPose(const Sophus::SE3f& Tcw, const builtin_interfaces::msg::Time& stamp)
 {
     /** @brief ORB_SLAM3 当前跟踪状态。 */
     const int trackingState = SLAM_->GetTrackingState();
     if (trackingState != ORB_SLAM3::Tracking::OK && trackingState != ORB_SLAM3::Tracking::OK_KLT)
     {
-        return;
+        return false;
     }
 
     /** @brief 世界系到机体系位姿。 */
@@ -357,8 +536,10 @@ void MonocularInertialNode::PublishBodyPose(const Sophus::SE3f& Tcw, const built
     poseMsg.pose.orientation.w = quaternion.w();
 
     posePub_->publish(poseMsg);
+    ++posePublishCount_;
 
     pathMsg_.header.stamp = stamp;
     pathMsg_.poses.push_back(poseMsg);
     pathPub_->publish(pathMsg_);
+    return true;
 }
