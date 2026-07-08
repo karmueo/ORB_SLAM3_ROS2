@@ -4,7 +4,7 @@
 
 目标链路使用：
 
-- 图像 topic：`/xv_sdk/SN250801DR48FB26001253/rgb/image`
+- 图像 topic：`/xv_sdk/SN250801DR48FB26001253/rgb_registered/image`
 - IMU topic：`/xv_sdk/SN250801DR48FB26001253/imu`
 - ORB-SLAM3 模式：`IMU_MONOCULAR`
 - 相机模型：`KannalaBrandt8`
@@ -687,7 +687,7 @@ ros2 run orbslam3 monocular-inertial \
   "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml" \
   false \
   --ros-args \
-  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb/image \
+  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
   -r imu:=/xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -696,7 +696,7 @@ ros2 run orbslam3 monocular-inertial \
 ```bash
 ros2 bag play /mnt/data/slam/my_umi_rosbag/2_filtered_vins_aux \
   --topics \
-  /xv_sdk/SN250801DR48FB26001253/rgb/image \
+  /xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
   /xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -734,7 +734,7 @@ ros2 run orbslam3 monocular-inertial \
   "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml" \
   false \
   --ros-args \
-  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb/image \
+  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
   -r imu:=/xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -836,7 +836,7 @@ PY
 `/orbslam3/body_pose` 只在 ORB-SLAM3 跟踪状态为 `OK` 或 `OK_KLT` 时发布。可先检查节点是否收到数据：
 
 ```bash
-ros2 topic hz /xv_sdk/SN250801DR48FB26001253/rgb/image
+ros2 topic hz /xv_sdk/SN250801DR48FB26001253/rgb_registered/image
 ros2 topic hz /xv_sdk/SN250801DR48FB26001253/imu
 ```
 

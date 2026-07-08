@@ -35,7 +35,7 @@ ros2 bag info "$BAG"
 - 存储格式：MCAP
 - ROS 发行版：Jazzy
 - 时长：约 `66.47 s`
-- 图像 topic：`/xv_sdk/SN250801DR48FB26001253/rgb/image`
+- 图像 topic：`/xv_sdk/SN250801DR48FB26001253/rgb_registered/image`
 - 图像消息数：`2907`，平均频率约 `43.73 Hz`
 - IMU topic：`/xv_sdk/SN250801DR48FB26001253/imu`
 - IMU 消息数：`23753`，平均频率约 `357.33 Hz`
@@ -74,7 +74,7 @@ ros2 bag info "$BAG" | grep -E "/rgb/image|/imu"
 期望至少看到：
 
 ```text
-/xv_sdk/SN250801DR48FB26001253/rgb/image
+/xv_sdk/SN250801DR48FB26001253/rgb_registered/image
 /xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -120,9 +120,9 @@ PKG=/home/scl/work/slam/ORB_SLAM3_ROS2
 ros2 run orbslam3 monocular-inertial \
   "$PKG/vocabulary/ORBvoc.txt" \
   "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml" \
-  false \
+  true \
   --ros-args \
-  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb/image \
+  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
   -r imu:=/xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -140,7 +140,7 @@ source /opt/ros/jazzy/setup.bash
 BAG=/mnt/data/slam/my_umi_rosbag/5
 ros2 bag play "$BAG" \
   --topics \
-  /xv_sdk/SN250801DR48FB26001253/rgb/image \
+  /xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
   /xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -150,7 +150,7 @@ ros2 bag play "$BAG" \
 ros2 bag play "$BAG" \
   --rate 0.5 \
   --topics \
-  /xv_sdk/SN250801DR48FB26001253/rgb/image \
+  /xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
   /xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -170,7 +170,7 @@ ros2 topic hz /orbslam3/path
 也可以直接检查输入 topic 是否正在发布：
 
 ```bash
-ros2 topic hz /xv_sdk/SN250801DR48FB26001253/rgb/image
+ros2 topic hz /xv_sdk/SN250801DR48FB26001253/rgb_registered/image
 ros2 topic hz /xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -241,7 +241,7 @@ ros2 pkg executables orbslam3
 `/orbslam3/body_pose` 只在 ORB-SLAM3 跟踪状态有效时发布。优先检查：
 
 - 启动命令是否运行 `orbslam3 monocular-inertial`。
-- `camera` remap 是否指向 `/xv_sdk/SN250801DR48FB26001253/rgb/image`。
+- `camera` remap 是否指向 `/xv_sdk/SN250801DR48FB26001253/rgb_registered/image`。
 - `imu` remap 是否指向 `/xv_sdk/SN250801DR48FB26001253/imu`。
 - `ros2 topic hz` 是否能看到图像和 IMU 输入。
 - 节点是否仍处于单目惯性初始化阶段。
@@ -254,7 +254,7 @@ ros2 pkg executables orbslam3
 ros2 bag play /mnt/data/slam/my_umi_rosbag/5 \
   --rate 0.5 \
   --topics \
-  /xv_sdk/SN250801DR48FB26001253/rgb/image \
+  /xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
   /xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -292,7 +292,7 @@ ros2 run orbslam3 monocular-inertial \
   "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml" \
   false \
   --ros-args \
-  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb/image \
+  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
   -r imu:=/xv_sdk/SN250801DR48FB26001253/imu
 ```
 

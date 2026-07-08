@@ -3,7 +3,7 @@
 本文记录在当前仓库中使用 ORB-SLAM3 `MONOCULAR` 模式跑通 `/home/scl/datasets/ros2bag/0707` 的最小链路。该流程只使用 XV RGB 鱼眼图像 topic：
 
 ```bash
-/xv_sdk/SN250801DR48FB26001253/rgb/image
+/xv_sdk/SN250801DR48FB26001253/rgb_registered/image
 ```
 
 纯单目运行的核心区别如下：
@@ -34,7 +34,7 @@ ros2 bag info "$BAG"
 - 存储格式：MCAP
 - ROS 发行版：Jazzy
 - 时长：约 `44.38 s`
-- 图像 topic：`/xv_sdk/SN250801DR48FB26001253/rgb/image`
+- 图像 topic：`/xv_sdk/SN250801DR48FB26001253/rgb_registered/image`
 - 图像消息数：`2664`
 - IMU topic：`/xv_sdk/SN250801DR48FB26001253/imu`
 - IMU 消息数：`21888`
@@ -73,7 +73,7 @@ ros2 bag info "$BAG" | grep -E "/rgb/image|/imu"
 期望至少看到：
 
 ```text
-/xv_sdk/SN250801DR48FB26001253/rgb/image
+/xv_sdk/SN250801DR48FB26001253/rgb_registered/image
 /xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -139,9 +139,9 @@ source /home/scl/work/slam/ORB_SLAM3_ROS2/install/local_setup.bash
 PKG=/home/scl/work/slam/ORB_SLAM3_ROS2
 xvfb-run -a ros2 run orbslam3 mono \
   "$PKG/vocabulary/ORBvoc.txt" \
-  "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated_resize_bag4.yaml" \
+  "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml" \
   --ros-args \
-  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb/image
+  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_registered/image
 ```
 
 当前 `mono` 可执行中的 Pangolin viewer 写死为开启。SSH、远程终端或无显示环境建议使用 `xvfb-run -a`。如果在本地桌面环境运行，也可以去掉 `xvfb-run -a`。
@@ -157,14 +157,14 @@ source /opt/ros/jazzy/setup.bash
 
 ros2 bag play /home/scl/datasets/ros2bag/0707 \
   --rate 0.5 \
-  --topics /xv_sdk/SN250801DR48FB26001253/rgb/image
+  --topics /xv_sdk/SN250801DR48FB26001253/rgb_registered/image
 ```
 
 如果 `0.5` 倍速稳定，再尝试默认速度：
 
 ```bash
 ros2 bag play /home/scl/datasets/ros2bag/0707 \
-  --topics /xv_sdk/SN250801DR48FB26001253/rgb/image
+  --topics /xv_sdk/SN250801DR48FB26001253/rgb_registered/image
 ```
 
 ## 7. 成功判据
@@ -184,7 +184,7 @@ xvfb-run -a ros2 run orbslam3 mono \
   "$PKG/vocabulary/ORBvoc.txt" \
   "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated_resize_bag4.yaml" \
   --ros-args \
-  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb/image \
+  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
   2>&1 | tee mono_0707.log
 ```
 

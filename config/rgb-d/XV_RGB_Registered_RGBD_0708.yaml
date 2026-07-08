@@ -1,0 +1,93 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# XV 0708 registered RGB-D 数据集运行配置。
+# 适配 /home/scl/datasets/ros2bag/0708 中已经对齐的 rgb_registered RGB 与深度图。
+#--------------------------------------------------------------------------------------------
+# 配置文件格式版本，ORB-SLAM3 新版 Settings 解析器使用该字段启用 Camera1/Stereo/RGBD 命名。
+File.version: "1.0"
+
+# 相机模型类型；rgb_registered 流按已对齐的 pinhole RGB-D 输入处理。
+Camera.type: "PinHole"
+
+# 相机 x 方向焦距 fx，单位为像素；当前先沿用 XV RGB 标定内参作为 registered 流初始值。
+Camera1.fx: 396.0595565986293
+# 相机 y 方向焦距 fy，单位为像素；当前先沿用 XV RGB 标定内参作为 registered 流初始值。
+Camera1.fy: 395.85243766764546
+# 主点 x 坐标 cx，单位为像素；当前先沿用 XV RGB 标定内参作为 registered 流初始值。
+Camera1.cx: 636.5742541685161
+# 主点 y 坐标 cy，单位为像素；当前先沿用 XV RGB 标定内参作为 registered 流初始值。
+Camera1.cy: 642.5331509623186
+
+# pinhole 径向畸变参数 k1；rgb_registered 流按已校正图像处理，因此置零。
+Camera1.k1: 0.0
+# pinhole 径向畸变参数 k2；rgb_registered 流按已校正图像处理，因此置零。
+Camera1.k2: 0.0
+# pinhole 切向畸变参数 p1；rgb_registered 流按已校正图像处理，因此置零。
+Camera1.p1: 0.0
+# pinhole 切向畸变参数 p2；rgb_registered 流按已校正图像处理，因此置零。
+Camera1.p2: 0.0
+# pinhole 径向畸变参数 k3；rgb_registered 流按已校正图像处理，因此置零。
+Camera1.k3: 0.0
+
+# 原始 RGB 和深度图宽度，单位为像素；0708 首帧检查结果为 1280x1280。
+Camera.width: 1280
+# 原始 RGB 和深度图高度，单位为像素；0708 首帧检查结果为 1280x1280。
+Camera.height: 1280
+# ORB-SLAM3 内部处理图像宽度，单位为像素；用于降低 1280x1280 输入的处理负载。
+Camera.newWidth: 960
+# ORB-SLAM3 内部处理图像高度，单位为像素；保持正方形输入比例。
+Camera.newHeight: 960
+# 图像帧率，单位为 Hz；0708 约 1122 帧 / 71.22 秒，按 16Hz 配置。
+Camera.fps: 16
+
+# 图像颜色通道顺序标志；rgb_registered/image 编码为 rgb8，因此填写 1。
+Camera.RGB: 1
+
+# Close/Far 深度阈值，单位为基线倍数；RGB-D 模式用于区分近点和远点。
+Stereo.ThDepth: 40.0
+# RGB-D 虚拟基线，单位为米；沿用 ORB-SLAM3 RealSense RGB-D 示例的 0.0745 初始值。
+Stereo.b: 0.0745
+
+# 深度图缩放因子；rgb_registered/depth 编码为 32FC1 且单位为米，因此填写 1.0。
+RGBD.DepthMapFactor: 1.0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters.
+#--------------------------------------------------------------------------------------------
+# 每帧提取的 ORB 特征点数量；沿用 XV bag4 稳定配置。
+ORBextractor.nFeatures: 1200
+# 图像金字塔相邻层缩放因子；沿用 XV bag4 稳定配置。
+ORBextractor.scaleFactor: 1.2
+# 图像金字塔层数；沿用 XV bag4 稳定配置。
+ORBextractor.nLevels: 8
+# FAST 初始阈值；沿用 XV bag4 稳定配置。
+ORBextractor.iniThFAST: 20
+# FAST 最小阈值；初始阈值提取不足时使用该阈值补充特征。
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters.
+#--------------------------------------------------------------------------------------------
+# Pangolin viewer 中关键帧相机模型的显示尺寸。
+Viewer.KeyFrameSize: 0.05
+# Pangolin viewer 中关键帧相机模型线宽。
+Viewer.KeyFrameLineWidth: 1.0
+# Pangolin viewer 中共视图/图优化连线宽度。
+Viewer.GraphLineWidth: 0.9
+# Pangolin viewer 中地图点显示大小。
+Viewer.PointSize: 2.0
+# Pangolin viewer 中当前相机模型的显示尺寸。
+Viewer.CameraSize: 0.08
+# Pangolin viewer 中当前相机模型线宽。
+Viewer.CameraLineWidth: 3.0
+# Pangolin viewer 初始观察位置 x 坐标。
+Viewer.ViewpointX: 0.0
+# Pangolin viewer 初始观察位置 y 坐标。
+Viewer.ViewpointY: -0.7
+# Pangolin viewer 初始观察位置 z 坐标。
+Viewer.ViewpointZ: -3.5
+# Pangolin viewer 初始观察焦距参数。
+Viewer.ViewpointF: 500.0
+# Pangolin viewer 图像显示缩放比例；配合 960x960 内部处理尺寸降低显示开销。
+Viewer.imageViewScale: 0.5
