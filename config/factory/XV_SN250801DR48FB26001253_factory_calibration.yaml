@@ -1,0 +1,117 @@
+# XV 设备出厂标定记录文件。
+# 本文件保存 XV SDK factory calibration 的原始内外参与坐标约定，用于复核、派生运行配置和后续标定对比。
+
+file_version: 1
+device:
+  name: "XV"
+  serial_number: "SN250801DR48FB26001253"
+  sdk_reported_serial_number: "250801DR48FB26001253"
+  sdk_version: "3.2.0-20251217(f18e96fc)"
+  device_version: "V1.04P31||2085V5|V1.00|20260204_04|develop|7329c09"
+
+source:
+  provider: "XV SDK factory calibration"
+  query_api:
+    rgb: "ColorCameraEx::calibrationEx()[0]"
+    tof: "CameraEx::calibrationEx()[0]"
+  query_date: "2026-07-08"
+  notes:
+    - "Calibration.pose 表示传感器坐标到 IMU 坐标的变换。"
+    - "矩阵命名采用 T_target_source：点从 source 坐标变换到 target 坐标。"
+    - "RGB-ToF 相对外参由 T_rgb_tof = inverse(T_imu_rgb) * T_imu_tof 派生。"
+
+units:
+  translation: "m"
+  rotation: "unitless"
+  focal_length: "pixel"
+  principal_point: "pixel"
+
+coordinate_convention:
+  transform_name_rule: "T_target_source"
+  sdk_pose_semantics: "T_imu_sensor"
+  matrix_layout: "row_major"
+  homogeneous_last_row: [0.0, 0.0, 0.0, 1.0]
+
+extrinsics:
+  T_imu_rgb:
+    target_frame: "imu"
+    source_frame: "rgb"
+    source: "XV SDK ColorCameraEx::calibrationEx()[0].pose"
+    matrix:
+      - [0.999835312366, 0.00646423175931, -0.0169579796493, -0.0185865499079]
+      - [-0.0061767580919, 0.99983727932, 0.0169500764459, 0.00573846651241]
+      - [0.0170647874475, -0.0168425384909, 0.999712526798, 0.00696954550222]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  T_rgb_imu:
+    target_frame: "rgb"
+    source_frame: "imu"
+    source: "inverse(T_imu_rgb)"
+    matrix:
+      - [0.999835301176207, -0.00617675783067839, 0.0170647888769156, 0.018500000020395]
+      - [0.00646423167119778, 0.999837236790878, -0.0168425390665696, -0.00549999989421468]
+      - [-0.0169579777905178, 0.0169500748970855, 0.999712512449499, -0.00737999958237575]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  T_imu_tof:
+    target_frame: "imu"
+    source_frame: "tof"
+    source: "XV SDK CameraEx::calibrationEx()[0].pose"
+    matrix:
+      - [0.999849557877, 0.00973460357636, -0.0143558112904, -0.0149991903454]
+      - [-0.00950231589377, 0.999824285507, 0.0161610990763, -0.015549743548]
+      - [0.0145106092095, -0.0160222556442, 0.999766349792, 0.00351533689536]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  T_rgb_tof:
+    target_frame: "rgb"
+    source_frame: "tof"
+    source: "inverse(T_imu_rgb) * T_imu_tof"
+    matrix:
+      - [0.99999119781759, 0.00328391140389285, 0.00260753158500722, 0.00365931550617841]
+      - [-0.00328190559037017, 0.9999943330971, -0.000772934449871134, -0.0212033779563191]
+      - [-0.00261005397243025, 0.000764367886849865, 0.999996306781815, -0.00387488668362501]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  T_tof_rgb:
+    target_frame: "tof"
+    source_frame: "rgb"
+    source: "inverse(T_rgb_tof)"
+    matrix:
+      - [0.999991218814576, -0.00328190612325675, -0.00261005502559546, -0.0037389845364612]
+      - [0.00328391083115698, 0.999994298538508, 0.000764369964785597, 0.0211942020472487]
+      - [0.00260753056725905, -0.000772932335557699, 0.999996296560165, 0.00384894177973221]
+      - [0.0, 0.0, 0.0, 1.0]
+
+rgb:
+  frame: "rgb"
+  intrinsics:
+    source: "XV SDK ColorCameraEx::calibrationEx()[0].seucm[0]"
+    model: "SEUCM"
+    width: 1280
+    height: 1280
+    fx: 396.109802246
+    fy: 396.109802246
+    u0: 637.652282715
+    v0: 642.243347168
+    eu: 639.014404297
+    ev: 640.803344727
+    alpha: 0.68319350481
+    beta: 0.739281475544
+  orb_slam3_compatibility:
+    supported_directly: false
+    note: "ORB-SLAM3 当前配置继续使用已标定的 KannalaBrandt8/Kalibr 内参；本文件只记录 SDK factory SEUCM 内参。"
+
+tof:
+  frame: "tof"
+  intrinsics:
+    source: "XV SDK CameraEx::calibrationEx()[0].pdcm[0]"
+    model: "PDCM0"
+    width: 640
+    height: 480
+    fx: 509.14440918
+    fy: 509.14440918
+    u0: 321.160888672
+    v0: 244.175796509
+    distortion_model: "opencv_radial_tangential"
+    distor: [0.0349495597184, -0.0844095423818, 0.0, 0.0, 0.0]
