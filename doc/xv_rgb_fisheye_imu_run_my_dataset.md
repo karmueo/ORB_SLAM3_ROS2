@@ -177,7 +177,7 @@ ros2 topic hz /xv_sdk/SN250801DR48FB26001253/imu
 一次可接受的 smoke test 应满足：
 
 - `monocular-inertial` 节点完成词典加载。
-- 节点收到 `/rgb/image` 和 `/imu` 数据。
+- 节点收到 `/rgb_registered/image` 和 `/imu` 数据。
 - `/orbslam3/body_pose` 有连续输出。
 - `/orbslam3/path` 的 pose 数量持续增长。
 - 节点退出后生成非空 `KeyFrameTrajectory.txt`。
