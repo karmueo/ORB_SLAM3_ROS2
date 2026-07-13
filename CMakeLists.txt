@@ -89,9 +89,18 @@ install(PROGRAMS scripts/evaluate_trajectory.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME evaluate_trajectory
 )
+install(PROGRAMS scripts/validate_xv_0709_bag.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME validate_xv_0709_bag
+)
+install(DIRECTORY config vocabulary
+  DESTINATION share/${PROJECT_NAME}
+)
 
 if(BUILD_TESTING)
   ament_add_pytest_test(evaluate_trajectory test/test_evaluate_trajectory.py)
+  ament_add_pytest_test(validate_xv_0709_bag test/test_validate_xv_0709_bag.py)
+  ament_add_pytest_test(xv_rgb_fisheye_config test/test_xv_rgb_fisheye_config.py)
   ament_add_gtest(test_rgbd_raw_data_converter test/test_rgbd_raw_data_converter.cpp src/rgbd/rgbd-raw-data-converter.cpp)
   if(TARGET test_rgbd_raw_data_converter)
     target_include_directories(test_rgbd_raw_data_converter PRIVATE src/rgbd)
@@ -109,8 +118,5 @@ if(BUILD_TESTING)
   endif()
 endif()
 
-# Install launch files.
-#install(DIRECTORY launch config vocabulary
-#  DESTINATION share/${PROJECT_NAME}/)
 
 ament_package()
