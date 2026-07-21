@@ -59,6 +59,8 @@ int main(int argc, char** argv)
     /** @brief ORB_SLAM3 单目惯性系统实例，负责跟踪、建图和轨迹保存。 */
     ORB_SLAM3::System SLAM(vocabularyFile, settingsFile, ORB_SLAM3::System::IMU_MONOCULAR, visualization);
 
+    /** @brief 节点是否因不可恢复的运行时错误停止。 */
+    bool runtimeFailed = false;
     {
         /** @brief ROS 2 单目惯性节点，作用域结束时先于 ROS shutdown 释放。 */
         auto node = std::make_shared<MonocularInertialNode>(&SLAM, settingsFile);
@@ -66,6 +68,7 @@ int main(int argc, char** argv)
         std::cout << "Monocular-Inertial" << std::endl;
 
         rclcpp::spin(node);
+        runtimeFailed = node->HasFatalError();
     }
 
     if (rclcpp::ok())
@@ -73,5 +76,5 @@ int main(int argc, char** argv)
         rclcpp::shutdown();
     }
 
-    return 0;
+    return runtimeFailed ? 2 : 0;
 }

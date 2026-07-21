@@ -61,6 +61,12 @@ public:
      */
     ~MonocularInertialNode();
 
+    /**
+     * @brief 查询节点是否因不可恢复的运行时错误停止。
+     * @return 发生图像/IMU 时基不一致等致命错误时返回 true。
+     */
+    bool HasFatalError() const;
+
 private:
     /**
      * @brief 缓存一帧 IMU 消息。
@@ -131,6 +137,14 @@ private:
     double lastImuTimestamp_;
     /** @brief 应用于 IMU 消息时间戳的固定偏移量，单位为秒。 */
     double imuTimeOffsetSec_;
+    /** @brief 已观察到的最新有限原始 IMU 时间戳，单位为秒；回跳样本不会覆盖该值。 */
+    double latestRawImuTimestamp_;
+    /** @brief 是否已确认图像与 IMU 的原始时间戳使用同一时间基准。 */
+    std::atomic<bool> timeBaseValidated_;
+    /** @brief 是否发生需要终止整个进程的运行时错误。 */
+    std::atomic<bool> fatalError_;
+    /** @brief 图像与最近 IMU 时间戳允许的最大启动差值，单位为秒。 */
+    static constexpr double kMaxTimeBaseDifferenceSec = 1.0;
     /** @brief IMU 小窗口重排长度，单位为秒；小于等于 0 时关闭重排。 */
     double imuReorderWindowSec_;
     /** @brief IMU 小窗口重排状态，用于缓存尚未越过窗口的样本。 */

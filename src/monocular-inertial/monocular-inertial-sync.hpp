@@ -79,6 +79,18 @@ class MonocularInertialSync
 {
 public:
   /**
+   * @brief 判断图像与最近 IMU 时间戳是否处于同一时间基准。
+   * @param imageTimestamp 当前图像原始时间戳，单位为秒。
+   * @param latestImuTimestamp 当前图像到达时最近的原始 IMU 时间戳，单位为秒。
+   * @param maxDifferenceSec 允许的最大绝对差值，单位为秒。
+   * @return 两个时间戳有限、阈值合法且绝对差不超过阈值时返回 true。
+   */
+  static bool AreTimeBasesAligned(
+      double imageTimestamp,
+      double latestImuTimestamp,
+      double maxDifferenceSec);
+
+  /**
    * @brief 判断 IMU 队列最新样本是否覆盖指定图像时间戳。
    * @param imuQueue IMU 消息队列。
    * @param imageTimestamp 图像时间戳，单位为秒。

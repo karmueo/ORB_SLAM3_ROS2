@@ -1,0 +1,53 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# XV SDK 已校正 RGB 鱼眼图像的纯单目配置。
+# 输入已经由 SDK 校正为理想针孔图像，ORB-SLAM3 不再执行鱼眼去畸变。
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters.
+#--------------------------------------------------------------------------------------------
+Camera.type: "PinHole"
+
+Camera1.fx: 397.07575683833136
+Camera1.fy: 397.07575683833136
+Camera1.cx: 637.7723482481603
+Camera1.cy: 640.0889202000565
+
+# 输入图像已经无畸变，因此有意省略 Camera1.k1/k2/p1/p2/k3。
+Camera.width: 1280
+Camera.height: 1280
+Camera.newWidth: 960
+Camera.newHeight: 960
+# 该参数用于 ORB-SLAM3 内部关键帧与恢复窗口；约 60 Hz 输入下实测 30 更稳定。
+Camera.fps: 60
+
+# XV SDK 已校正图像编码为 rgb8。
+Camera.RGB: 1
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters.
+#--------------------------------------------------------------------------------------------
+ORBextractor.nFeatures: 1200
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters.
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0
+# 仅缩放 Current Frame 显示图像：960 * 1.0 = 960；不影响特征提取输入。
+Viewer.imageViewScale: 1.0

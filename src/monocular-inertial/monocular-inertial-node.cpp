@@ -9,10 +9,14 @@
 #include <opencv2/imgproc/imgproc.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <string>
 
 using std::placeholders::_1;
+
+/** @brief 为 C++14 提供时基差值阈值常量的存储定义。 */
+constexpr double MonocularInertialNode::kMaxTimeBaseDifferenceSec;
 
 /**
  * @brief 创建单目惯性 SLAM 节点并启动图像/IMU 同步线程。
@@ -29,6 +33,9 @@ MonocularInertialNode::MonocularInertialNode(ORB_SLAM3::System* SLAM, const std:
     lastImageTimestamp_(-1.0),
     lastImuTimestamp_(-1.0),
     imuTimeOffsetSec_(0.0),
+    latestRawImuTimestamp_(-1.0),
+    timeBaseValidated_(false),
+    fatalError_(false),
     imuReorderWindowSec_(0.0),
     imuReorderState_(),
     receivedImageCount_(0U),
@@ -150,6 +157,15 @@ MonocularInertialNode::~MonocularInertialNode()
 }
 
 /**
+ * @brief 查询节点是否因不可恢复的运行时错误停止。
+ * @return 发生图像/IMU 时基不一致等致命错误时返回 true。
+ */
+bool MonocularInertialNode::HasFatalError() const
+{
+    return fatalError_.load();
+}
+
+/**
  * @brief 缓存一帧 IMU 消息。
  * @param msg IMU 消息共享指针。
  */
@@ -157,6 +173,8 @@ void MonocularInertialNode::GrabImu(const ImuMsg::SharedPtr msg)
 {
     /** @brief IMU 队列锁，保护 IMU 数据入队。 */
     std::lock_guard<std::mutex> lock(imuMutex_);
+    /** @brief 当前 IMU 消息中未应用偏移的原始时间戳，单位为秒。 */
+    const double rawImuTimestamp = Utility::StampToSec(msg->header.stamp);
     /** @brief 当前调用前被过滤的 IMU 样本数量。 */
     std::uint64_t droppedImuCount = droppedImuCount_.load();
     /** @brief 当前 IMU 样本入队统计。 */
@@ -170,6 +188,11 @@ void MonocularInertialNode::GrabImu(const ImuMsg::SharedPtr msg)
         &droppedImuCount);
     queuedImuCount_.fetch_add(pushResult.acceptedCount);
     droppedImuCount_.store(droppedImuCount);
+    if (std::isfinite(rawImuTimestamp) &&
+        (latestRawImuTimestamp_ < 0.0 || rawImuTimestamp > latestRawImuTimestamp_))
+    {
+        latestRawImuTimestamp_ = rawImuTimestamp;
+    }
     if (pushResult.droppedCount > 0U)
     {
         RCLCPP_WARN_THROTTLE(
@@ -189,6 +212,43 @@ void MonocularInertialNode::GrabImu(const ImuMsg::SharedPtr msg)
  */
 void MonocularInertialNode::GrabImage(const ImageMsg::SharedPtr msg)
 {
+    if (!timeBaseValidated_.load())
+    {
+        /** @brief 当前待校验图像的原始时间戳，单位为秒。 */
+        const double imageTimestamp = Utility::StampToSec(msg->header.stamp);
+        /** @brief 时基检查期间的 IMU 队列锁，保护最近原始 IMU 时间戳。 */
+        std::lock_guard<std::mutex> imuLock(imuMutex_);
+        if (latestRawImuTimestamp_ >= 0.0)
+        {
+            /** @brief 图像与最近原始 IMU 时间戳的绝对差，单位为秒。 */
+            const double timeBaseDifferenceSec = std::abs(imageTimestamp - latestRawImuTimestamp_);
+            if (!MonocularInertialSync::AreTimeBasesAligned(
+                    imageTimestamp,
+                    latestRawImuTimestamp_,
+                    kMaxTimeBaseDifferenceSec))
+            {
+                fatalError_.store(true);
+                stopSync_.store(true);
+                RCLCPP_FATAL(
+                    this->get_logger(),
+                    "图像与 IMU 时间基准未对齐，程序即将退出：image_t=%.9f，imu_t=%.9f，差值=%.6f秒，允许上限=%.3f秒。请在设备发布端统一 header.stamp，节点不会自动修正时间基准。",
+                    imageTimestamp,
+                    latestRawImuTimestamp_,
+                    timeBaseDifferenceSec,
+                    kMaxTimeBaseDifferenceSec);
+                rclcpp::shutdown();
+                return;
+            }
+            timeBaseValidated_.store(true);
+            RCLCPP_INFO(
+                this->get_logger(),
+                "图像与 IMU 时间基准检查通过：image_t=%.9f，imu_t=%.9f，差值=%.3fms",
+                imageTimestamp,
+                latestRawImuTimestamp_,
+                timeBaseDifferenceSec * 1000.0);
+        }
+    }
+
     /** @brief 图像队列锁，保护图像数据入队。 */
     std::lock_guard<std::mutex> lock(imgMutex_);
     ++receivedImageCount_;
@@ -210,7 +270,7 @@ void MonocularInertialNode::GrabImage(const ImageMsg::SharedPtr msg)
     if (pushResult.droppedByRateLimit)
     {
         ++droppedImageCount_;
-        RCLCPP_WARN_THROTTLE(
+        RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             5000,
@@ -261,7 +321,22 @@ cv::Mat MonocularInertialNode::GetImage(const ImageMsg::SharedPtr msg)
     {
         /** @brief 彩色图像转换后的灰度图。 */
         cv::Mat grayImage;
-        cv::cvtColor(cvPtr->image, grayImage, cv::COLOR_BGR2GRAY);
+        if (msg->encoding == sensor_msgs::image_encodings::RGB8)
+        {
+            cv::cvtColor(cvPtr->image, grayImage, cv::COLOR_RGB2GRAY);
+        }
+        else if (msg->encoding == sensor_msgs::image_encodings::BGR8)
+        {
+            cv::cvtColor(cvPtr->image, grayImage, cv::COLOR_BGR2GRAY);
+        }
+        else
+        {
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "Unsupported three-channel image encoding: %s",
+                msg->encoding.c_str());
+            return cv::Mat();
+        }
         return grayImage;
     }
 
@@ -358,7 +433,7 @@ void MonocularInertialNode::SyncWithImu()
             if (!MonocularInertialSync::HasImuCoverageForImage(imuBuf_, tIm))
             {
                 ++imuWaitCount_;
-                RCLCPP_WARN_THROTTLE(
+                RCLCPP_DEBUG_THROTTLE(
                     this->get_logger(),
                     *this->get_clock(),
                     5000,
@@ -466,7 +541,7 @@ void MonocularInertialNode::SyncWithImu()
                                                   : 0.0;
         /** @brief 当前累计发布的机体系位姿数量。 */
         const std::uint64_t posePublishCount = posePublishCount_.load();
-        RCLCPP_INFO(
+        RCLCPP_DEBUG(
             this->get_logger(),
             "单目惯性帧诊断：tracking_state=%d，image_t=%.9f，imu_count=%zu，imu_first=%.9f，imu_last=%.9f，pose_published=%d，pose_publish_count=%lu，track_time=%.2fms",
             trackingState,

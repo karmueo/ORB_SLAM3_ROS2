@@ -278,6 +278,32 @@ TEST(MonocularInertialSync, DropsOldestImageWhenQueueLimitIsExceeded)
   EXPECT_DOUBLE_EQ(Utility::StampToSec(imageQueue.front()->header.stamp), 1.03);
 }
 
+TEST(MonocularInertialSync, AcceptsAlignedImageAndImuTimeBases)
+{
+  /** @brief 实测校正图像时间戳，单位为秒。 */
+  const double imageTimestamp = 288763.403175746;
+  /** @brief 同一时刻附近的实测 IMU 时间戳，单位为秒。 */
+  const double latestImuTimestamp = 288763.410210499;
+
+  EXPECT_TRUE(MonocularInertialSync::AreTimeBasesAligned(
+      imageTimestamp,
+      latestImuTimestamp,
+      1.0));
+}
+
+TEST(MonocularInertialSync, RejectsDifferentImageAndImuTimeBases)
+{
+  /** @brief 旧实时校正图像所在的设备时间基准，单位为秒。 */
+  const double imageTimestamp = 2668.036934;
+  /** @brief 旧 IMU 使用的主机 steady clock 时间基准，单位为秒。 */
+  const double latestImuTimestamp = 286132.143124;
+
+  EXPECT_FALSE(MonocularInertialSync::AreTimeBasesAligned(
+      imageTimestamp,
+      latestImuTimestamp,
+      1.0));
+}
+
 TEST(MonocularInertialSync, RejectsImageWhenTargetFpsIntervalHasNotElapsed)
 {
   /** @brief 待测试的图像队列。 */

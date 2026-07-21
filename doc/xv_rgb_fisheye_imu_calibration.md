@@ -2,13 +2,17 @@
 
 本文说明如何为当前 `orbslam3` ROS 2 wrapper 标定 XV RGB 鱼眼相机和 IMU，并把 Kalibr/Allan 结果写入 `config/monocular-inertial/XV_RGB_Fisheye.yaml`，用于 `monocular-inertial` 节点。
 
-目标链路使用：
+标定输入和原始鱼眼运行链路使用：
 
-- 图像 topic：`/xv_sdk/SN250801DR48FB26001253/rgb_registered/image`
+- 原始鱼眼图像 topic：`/xv_sdk/SN250801DR48FB26001253/rgb/image`
 - IMU topic：`/xv_sdk/SN250801DR48FB26001253/imu`
 - ORB-SLAM3 模式：`IMU_MONOCULAR`
 - 相机模型：`KannalaBrandt8`
 - 输出配置：`config/monocular-inertial/XV_RGB_Fisheye.yaml`
+
+`cam0/` 中的标定图片来自未去畸变的原始 RGB 鱼眼帧。设备侧校正图像会发布到
+`/xv_sdk/<序列号>/rgb_fisheye_undistorted/image`，该输出应使用 `PinHole` 配置，具体参见
+`doc/xv_rgb_fisheye_undistorted_imu_live.md`。两条链路不能混用相机模型和畸变参数。
 
 ## 1. 数据和文件
 
@@ -687,7 +691,7 @@ ros2 run orbslam3 monocular-inertial \
   "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml" \
   false \
   --ros-args \
-  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
+  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb/image \
   -r imu:=/xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -696,7 +700,7 @@ ros2 run orbslam3 monocular-inertial \
 ```bash
 ros2 bag play /mnt/data/slam/my_umi_rosbag/2_filtered_vins_aux \
   --topics \
-  /xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
+  /xv_sdk/SN250801DR48FB26001253/rgb/image \
   /xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -734,7 +738,7 @@ ros2 run orbslam3 monocular-inertial \
   "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml" \
   false \
   --ros-args \
-  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
+  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb/image \
   -r imu:=/xv_sdk/SN250801DR48FB26001253/imu
 ```
 
@@ -836,7 +840,7 @@ PY
 `/orbslam3/body_pose` 只在 ORB-SLAM3 跟踪状态为 `OK` 或 `OK_KLT` 时发布。可先检查节点是否收到数据：
 
 ```bash
-ros2 topic hz /xv_sdk/SN250801DR48FB26001253/rgb_registered/image
+ros2 topic hz /xv_sdk/SN250801DR48FB26001253/rgb/image
 ros2 topic hz /xv_sdk/SN250801DR48FB26001253/imu
 ```
 

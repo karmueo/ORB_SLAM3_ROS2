@@ -19,11 +19,27 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Eigen REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(Pangolin REQUIRED)
 find_package(ORB_SLAM3 REQUIRED)
+
+# 从仓库跟踪的压缩包生成运行时需要的 ORB-SLAM3 文本词典。
+set(ORB_VOCABULARY_ARCHIVE "${CMAKE_CURRENT_SOURCE_DIR}/vocabulary/ORBvoc.txt.tar.gz")
+set(ORB_VOCABULARY_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/vocabulary")
+set(ORB_VOCABULARY_FILE "${ORB_VOCABULARY_BUILD_DIR}/ORBvoc.txt")
+file(MAKE_DIRECTORY "${ORB_VOCABULARY_BUILD_DIR}")
+add_custom_command(
+  OUTPUT "${ORB_VOCABULARY_FILE}"
+  COMMAND "${CMAKE_COMMAND}" -E tar xzf "${ORB_VOCABULARY_ARCHIVE}"
+  DEPENDS "${ORB_VOCABULARY_ARCHIVE}"
+  WORKING_DIRECTORY "${ORB_VOCABULARY_BUILD_DIR}"
+  COMMENT "Extracting ORB-SLAM3 vocabulary"
+  VERBATIM
+)
+add_custom_target(extract_orb_vocabulary ALL DEPENDS "${ORB_VOCABULARY_FILE}")
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
@@ -44,9 +60,11 @@ link_directories(
 
 add_executable(mono
   src/monocular/mono.cpp
+  src/monocular/monocular-feature-mask.cpp
+  src/monocular/monocular-pose.cpp
   src/monocular/monocular-slam-node.cpp
 )
-ament_target_dependencies(mono rclcpp sensor_msgs cv_bridge ORB_SLAM3 Pangolin OpenCV)
+ament_target_dependencies(mono rclcpp sensor_msgs geometry_msgs nav_msgs cv_bridge tf2_ros ORB_SLAM3 Pangolin OpenCV)
 
 add_executable(monocular-inertial
   src/monocular-inertial/monocular-inertial.cpp
@@ -93,7 +111,18 @@ install(PROGRAMS scripts/validate_xv_0709_bag.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME validate_xv_0709_bag
 )
-install(DIRECTORY config vocabulary
+install(DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}
+)
+install(FILES "${ORB_VOCABULARY_ARCHIVE}" "${ORB_VOCABULARY_FILE}"
+  DESTINATION share/${PROJECT_NAME}/vocabulary
+)
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+)
+install(DIRECTORY rviz
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -101,6 +130,19 @@ if(BUILD_TESTING)
   ament_add_pytest_test(evaluate_trajectory test/test_evaluate_trajectory.py)
   ament_add_pytest_test(validate_xv_0709_bag test/test_validate_xv_0709_bag.py)
   ament_add_pytest_test(xv_rgb_fisheye_config test/test_xv_rgb_fisheye_config.py)
+  ament_add_pytest_test(xv_rgb_fisheye_monocular_config test/test_xv_rgb_fisheye_monocular_config.py)
+  ament_add_gtest(test_monocular_feature_mask test/test_monocular_feature_mask.cpp src/monocular/monocular-feature-mask.cpp)
+  if(TARGET test_monocular_feature_mask)
+    target_include_directories(test_monocular_feature_mask PRIVATE src/monocular)
+    target_compile_definitions(test_monocular_feature_mask PRIVATE ORBSLAM3_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    ament_target_dependencies(test_monocular_feature_mask OpenCV)
+  endif()
+  ament_add_gtest(test_monocular_pose test/test_monocular_pose.cpp src/monocular/monocular-pose.cpp)
+  if(TARGET test_monocular_pose)
+    target_include_directories(test_monocular_pose PRIVATE src/monocular)
+    ament_target_dependencies(test_monocular_pose geometry_msgs nav_msgs)
+  endif()
+
   ament_add_gtest(test_rgbd_raw_data_converter test/test_rgbd_raw_data_converter.cpp src/rgbd/rgbd-raw-data-converter.cpp)
   if(TARGET test_rgbd_raw_data_converter)
     target_include_directories(test_rgbd_raw_data_converter PRIVATE src/rgbd)
