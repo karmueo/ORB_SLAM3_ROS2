@@ -1,8 +1,10 @@
 %YAML:1.0
 
 #--------------------------------------------------------------------------------------------
-# XV RGB 鱼眼单目惯性标定配置。
-# 参数来自 /mnt/data/slam/my_umi_rosbag 下的 Kalibr 相机/IMU-camera 标定和 Allan 噪声估计结果。
+# XV RGB 鱼眼原始/注册图像单目惯性配置。
+# 相机内参、equidistant 畸变、T_cam_imu 和时间偏移来自：
+# $HOME/ros2_ws/src/xv_sdk_ros2/config/kalibr_data-camchain-imucam.yaml
+# IMU 噪声参数来自配套 Allan 标定结果；运行频率和队列参数属于 ROS wrapper 调优值。
 #--------------------------------------------------------------------------------------------
 # 配置文件格式版本，ORB-SLAM3 用于识别当前 YAML 配置格式。
 File.version: "1.0"
@@ -73,16 +75,16 @@ IMU.InsertKFsWhenLost: 0
 # 低运动惯性初始化策略；启用后在 BA2 完成前延后低运动触发的 active map reset。
 IMU.DeferLowMotionReset: 1
 
-# 陀螺仪白噪声密度，单位为 rad/s/sqrt(Hz)；来自 Allan gyroscope_noise_density。
-IMU.NoiseGyro: 0.00013340717339568767
-# 加速度计白噪声密度，单位为 m/s^2/sqrt(Hz)；来自 Allan accelerometer_noise_density。
-IMU.NoiseAcc: 0.011362633638908732
-# 陀螺仪随机游走，单位按 ORB-SLAM3/Kalibr IMU 模型使用；来自 Allan gyroscope_random_walk。
-IMU.GyroWalk: 4.905584115261025e-06
-# 加速度计随机游走，单位按 ORB-SLAM3/Kalibr IMU 模型使用；来自 Allan accelerometer_random_walk。
-IMU.AccWalk: 0.0003604781951727939
-# IMU 发布频率，单位为 Hz；来自 /xv_sdk/SN250801DR48FB26001253/imu 的实测平均频率。
-IMU.Frequency: 493.3
+# 陀螺仪白噪声密度，单位为 rad/s/sqrt(Hz)；来自 xv_sdk_ros2/config/imu.yaml。
+IMU.NoiseGyro: 6.342105454949378e-05
+# 加速度计白噪声密度，单位为 m/s^2/sqrt(Hz)；来自 xv_sdk_ros2/config/imu.yaml。
+IMU.NoiseAcc: 0.0016827827305701717
+# 陀螺仪随机游走，单位按 ORB-SLAM3/Kalibr IMU 模型使用；来自 xv_sdk_ros2/config/imu.yaml。
+IMU.GyroWalk: 4.2371968480801686e-06
+# 加速度计随机游走，单位按 ORB-SLAM3/Kalibr IMU 模型使用；来自 xv_sdk_ros2/config/imu.yaml。
+IMU.AccWalk: 5.235024282770444e-05
+# IMU 发布频率，单位为 Hz；来自 xv_sdk_ros2/config/imu.yaml 的 update_rate。
+IMU.Frequency: 493.0
 
 #--------------------------------------------------------------------------------------------
 # ORB Parameters.
@@ -122,4 +124,4 @@ Viewer.ViewpointZ: -3.5
 # Pangolin viewer 初始观察焦距参数。
 Viewer.ViewpointF: 500.0
 # Pangolin viewer 图像显示缩放比例。
-Viewer.imageViewScale: 2.0
+Viewer.imageViewScale: 0.8

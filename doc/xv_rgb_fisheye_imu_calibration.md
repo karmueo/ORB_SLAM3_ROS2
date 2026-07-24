@@ -1,6 +1,6 @@
 # XV RGB 鱼眼相机与 IMU 标定流程
 
-本文说明如何为当前 `orbslam3` ROS 2 wrapper 标定 XV RGB 鱼眼相机和 IMU，并把 Kalibr/Allan 结果写入 `config/monocular-inertial/XV_RGB_Fisheye.yaml`，用于 `monocular-inertial` 节点。
+本文说明如何为当前 `orbslam3` ROS 2 wrapper 标定 XV RGB 鱼眼相机和 IMU，并把 Kalibr/Allan 结果写入 `config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml`，用于 `monocular-inertial` 节点。当前设备归档的原始 Kalibr 结果位于 `$HOME/ros2_ws/src/xv_sdk_ros2/config/kalibr_data-camchain-imucam.yaml`。
 
 标定输入和原始鱼眼运行链路使用：
 
@@ -8,7 +8,8 @@
 - IMU topic：`/xv_sdk/SN250801DR48FB26001253/imu`
 - ORB-SLAM3 模式：`IMU_MONOCULAR`
 - 相机模型：`KannalaBrandt8`
-- 输出配置：`config/monocular-inertial/XV_RGB_Fisheye.yaml`
+- 原始 Kalibr 结果：`$HOME/ros2_ws/src/xv_sdk_ros2/config/kalibr_data-camchain-imucam.yaml`
+- 输出配置：`config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml`
 
 `cam0/` 中的标定图片来自未去畸变的原始 RGB 鱼眼帧。设备侧校正图像会发布到
 `/xv_sdk/<序列号>/rgb_fisheye_undistorted/image`，该输出应使用 `PinHole` 配置，具体参见
@@ -18,13 +19,13 @@
 
 建议使用以下数据分工：
 
-以下命令默认数据根目录为 `/mnt/data/slam/my_umi_rosbag`；如果你的数据存放位置不同，需要按实际环境修改该路径。
+以下命令默认数据根目录为 `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}`；如果你的数据存放位置不同，需要按实际环境修改该路径。
 
-- `/mnt/data/slam/my_umi_rosbag/3`：AprilGrid 相机和 IMU-camera 标定数据，目录内已有 `cam0/` 和 `imu/imu_clean.csv`。
-- `/mnt/data/slam/my_umi_rosbag/1`：长时间静止或缓慢运动 IMU 数据，用于估计 Allan 噪声。
-- `/mnt/data/slam/my_umi_rosbag/2_filtered_vins_aux`：SLAM 目标数据，用于最终运行和 smoke test。
+- `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3`：AprilGrid 相机和 IMU-camera 标定数据，目录内已有 `cam0/` 和 `imu/imu_clean.csv`。
+- `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1`：长时间静止或缓慢运动 IMU 数据，用于估计 Allan 噪声。
+- `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/2_filtered_vins_aux`：SLAM 目标数据，用于最终运行和 smoke test。
 
-你还需要准备与 3 号 AprilGrid 标定板匹配的 Kalibr target 文件。当前数据目录下已有 `/mnt/data/slam/my_umi_rosbag/april_6x6.yaml`，该文件描述 AprilGrid 的行列数、tag 尺寸和间距，例如：
+你还需要准备与 3 号 AprilGrid 标定板匹配的 Kalibr target 文件。当前数据目录下已有 `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/april_6x6.yaml`，该文件描述 AprilGrid 的行列数、tag 尺寸和间距，例如：
 
 ```yaml
 target_type: aprilgrid
@@ -125,8 +126,8 @@ rosbags-convert --help
 把 rosbag2 转为 ROS 1 bag 的示例命令如下：
 
 ```bash
-ROS2_BAG=/mnt/data/slam/my_umi_rosbag/3
-ROS1_BAG=/mnt/data/slam/my_umi_rosbag/3/xv_rgb_imu_calib.bag
+ROS2_BAG=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3
+ROS1_BAG=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3/xv_rgb_imu_calib.bag
 
 rosbags-convert --src "$ROS2_BAG" --dst "$ROS1_BAG"
 ```
@@ -207,14 +208,17 @@ Kalibr 相机模型使用 `pinhole-equi`，对应 ORB-SLAM3 配置中的：
 Twb = Tcw.inverse() * IMU.T_b_c1.inverse()
 ```
 
-因此 `IMU.T_b_c1` 必须表示机体系到相机系的变换。Kalibr 标准 `T_cam_imu` 通常表示把 IMU 坐标变换到相机坐标，语义与 `IMU.T_b_c1` 一致，可以直接写入。若你的标定脚本或后处理文件给出的是相机到 IMU 的矩阵，需要先取逆。写入前应结合报告中的坐标系说明复核一次。
+其中 `IMU.T_b_c1` 是 `T_b_c`，表示把相机坐标变换到 IMU/body 坐标。Kalibr 标准
+`T_cam_imu` 是 `T_c_b`，表示把 IMU/body 坐标变换到相机坐标，因此写入
+`IMU.T_b_c1` 前需要取逆。若标定脚本已经输出相机到 IMU/body 的矩阵，可以直接写入。
+写入前应结合报告中的坐标系说明复核一次。
 
 ## 4. 生成 Kalibr 输入数据
 
 如果已经有 Kalibr 支持的 `cam0/` 图片目录和 `imu/imu_clean.csv`，可以直接打包成 Kalibr bag。建议先整理目录：
 
 ```bash
-CALIB_ROOT=/mnt/data/slam/my_umi_rosbag/3
+CALIB_ROOT=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3
 find "$CALIB_ROOT/cam0" -maxdepth 1 -type f | head
 head "$CALIB_ROOT/imu/imu_clean.csv"
 ```
@@ -230,7 +234,7 @@ timestamp,omega_x,omega_y,omega_z,alpha_x,alpha_y,alpha_z
 使用 `kalibr_bagcreater` 生成标定 bag：
 
 ```bash
-CALIB_ROOT=/mnt/data/slam/my_umi_rosbag/3
+CALIB_ROOT=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3
 KALIBR_WS=/work
 
 docker run --rm -it \
@@ -251,7 +255,7 @@ docker run --rm -it \
 用长时间 IMU 数据估计噪声参数，输出 Kalibr `imu.yaml`。当前 1 号数据是 ROS 2 MCAP bag，包含一个 IMU topic，适合直接用 `allan_variance_ros2` 处理：
 
 ```bash
-IMU_BAG=/mnt/data/slam/my_umi_rosbag/1
+IMU_BAG=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1
 ros2 bag info "$IMU_BAG"
 ```
 
@@ -277,7 +281,7 @@ Type:              sensor_msgs/msg/Imu
 `allan_variance_ros2` 的配置文件需要写明 IMU topic、原始频率、降采样频率、使用时长和起始偏移。建议先使用 12 小时数据，并跳过开始 5 分钟，避免刚放置设备时的扰动：
 
 ```bash
-ALLAN_ROOT=/mnt/data/slam/my_umi_rosbag/1_allan
+ALLAN_ROOT=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan
 mkdir -p "$ALLAN_ROOT"
 
 cat > "$ALLAN_ROOT/xv_imu_allan.yaml" <<'EOF'
@@ -306,8 +310,8 @@ EOF
 `allan_variance_ros2` 可以直接读取 MCAP bag，不需要播放 bag，也不需要转换为 ROS 1 bag。计算程序不会自动创建输出目录，因此先确认 `ALLAN_ROOT` 已存在：
 
 ```bash
-IMU_BAG=/mnt/data/slam/my_umi_rosbag/1
-ALLAN_ROOT=/mnt/data/slam/my_umi_rosbag/1_allan
+IMU_BAG=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1
+ALLAN_ROOT=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan
 
 cd ~/allan_ws
 
@@ -315,7 +319,7 @@ env -i HOME="$HOME" USER="$USER" SHELL=/bin/bash TERM="${TERM:-xterm}" \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   bash --noprofile --norc -c "\
     source /opt/ros/jazzy/setup.bash && \
-    source /home/scl/allan_ws/install/setup.bash && \
+    source $HOME/allan_ws/install/setup.bash && \
     ros2 run allan_variance_ros2 allan_variance \
       $IMU_BAG \
       $ALLAN_ROOT/xv_imu_allan.yaml \
@@ -326,9 +330,9 @@ env -i HOME="$HOME" USER="$USER" SHELL=/bin/bash TERM="${TERM:-xterm}" \
 计算完成后应生成：
 
 ```bash
-test -s /mnt/data/slam/my_umi_rosbag/1_allan/allan_variance.csv
-wc -l /mnt/data/slam/my_umi_rosbag/1_allan/allan_variance.csv
-grep -E "Finished buffering data|Data written" /mnt/data/slam/my_umi_rosbag/1_allan/run.log
+test -s ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan/allan_variance.csv
+wc -l ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan/allan_variance.csv
+grep -E "Finished buffering data|Data written" ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan/run.log
 ```
 
 当前 12 小时配置的实测结果为：降采样后缓存 `4260475` 条 IMU 测量，`allan_variance.csv` 输出 `9999` 行。若首次验证工具链，可以先把 `sequence_duration` 改为 `1200` 或 `10800`；正式结果建议使用更长的静止数据段。
@@ -338,12 +342,12 @@ grep -E "Finished buffering data|Data written" /mnt/data/slam/my_umi_rosbag/1_al
 分析脚本会读取 `allan_variance.csv`，拟合 Allan 曲线，并把 Kalibr 需要的噪声字段写入当前工作目录下的 `imu.yaml`。因此应进入输出目录后再运行脚本：
 
 ```bash
-cd /mnt/data/slam/my_umi_rosbag/1_allan
+cd ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan
 
 env -i HOME="$HOME" USER="$USER" MPLBACKEND=Agg \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   /usr/bin/python3 \
-    /home/scl/allan_ws/src/allan_variance_ros2/src/allan_variance_ros2/scripts/analysis.py \
+    $HOME/allan_ws/src/allan_variance_ros2/src/allan_variance_ros2/scripts/analysis.py \
     --data allan_variance.csv \
     --config xv_imu_allan.yaml \
     > analysis.log 2>&1
@@ -352,9 +356,9 @@ env -i HOME="$HOME" USER="$USER" MPLBACKEND=Agg \
 输出文件包括：
 
 ```bash
-test -s /mnt/data/slam/my_umi_rosbag/1_allan/imu.yaml
-test -s /mnt/data/slam/my_umi_rosbag/1_allan/acceleration.png
-test -s /mnt/data/slam/my_umi_rosbag/1_allan/gyro.png
+test -s ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan/imu.yaml
+test -s ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan/acceleration.png
+test -s ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan/gyro.png
 ```
 
 `imu.yaml` 中的 `rostopic` 应保持为真实 IMU topic，`update_rate` 应保持为 `493.2` 左右：
@@ -368,7 +372,7 @@ gyroscope_noise_density: 0.00013340717339568767
 gyroscope_random_walk: 4.905584115261025e-06
 ```
 
-上面 4 个噪声字段是当前 `/mnt/data/slam/my_umi_rosbag/1` 数据的实测结果。换数据或调整 Allan 时间窗口后，应重新生成并替换。
+上面 4 个噪声字段是当前 `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1` 数据的实测结果。换数据或调整 Allan 时间窗口后，应重新生成并替换。
 
 ### 5.4 检查 Allan 结果
 
@@ -429,8 +433,8 @@ gyroscope_random_walk: 0.0
 运行单相机标定，使用 `pinhole-equi` 模型：
 
 ```bash
-CALIB_ROOT=/mnt/data/slam/my_umi_rosbag/3
-TARGET=/mnt/data/slam/my_umi_rosbag/april_6x6.yaml
+CALIB_ROOT=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3
+TARGET=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/april_6x6.yaml
 
 test -d "$CALIB_ROOT"
 test -f "$CALIB_ROOT/xv_rgb_imu_calib.bag"
@@ -457,7 +461,7 @@ docker run --rm -it \
 如果还没有实际标定板文件，先创建 `april_6x6.yaml`，并把参数替换成真实 AprilGrid 尺寸：
 
 ```bash
-TARGET=/mnt/data/slam/my_umi_rosbag/april_6x6.yaml
+TARGET=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/april_6x6.yaml
 
 cat > "$TARGET" <<'EOF'
 target_type: aprilgrid
@@ -468,7 +472,7 @@ tagSpacing: 0.3
 EOF
 ```
 
-如果改用 `/mnt/data/slam/my_umi_rosbag/checkerboard.yaml`，代表标定数据中拍摄的是棋盘格，Kalibr target 文件字段也会变为 `target_type: checkerboard`、`targetCols`、`targetRows`、`rowSpacingMeters` 和 `colSpacingMeters`。AprilGrid 适合自动识别带 ID 的 AprilTag 网格，部分遮挡和姿态变化时更稳；checkerboard 依赖棋盘格角点检测，图案更简单，但需要画面中角点清晰且覆盖充分。两者不能混用：拍摄 AprilGrid 就使用 `april_6x6.yaml`，拍摄棋盘格才使用 `checkerboard.yaml`。
+如果改用 `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/checkerboard.yaml`，代表标定数据中拍摄的是棋盘格，Kalibr target 文件字段也会变为 `target_type: checkerboard`、`targetCols`、`targetRows`、`rowSpacingMeters` 和 `colSpacingMeters`。AprilGrid 适合自动识别带 ID 的 AprilTag 网格，部分遮挡和姿态变化时更稳；checkerboard 依赖棋盘格角点检测，图案更简单，但需要画面中角点清晰且覆盖充分。两者不能混用：拍摄 AprilGrid 就使用 `april_6x6.yaml`，拍摄棋盘格才使用 `checkerboard.yaml`。
 
 检查报告重点：
 
@@ -486,7 +490,7 @@ EOF
 
 ```bash
 docker run --rm \
-  -v /mnt/data/slam/my_umi_rosbag/3:/work/calib_data \
+  -v ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3:/work/calib_data \
   --entrypoint /bin/bash \
   kalibr \
   -lc "\
@@ -510,7 +514,7 @@ PY"
 为 IMU-camera 标定创建一个专用 IMU YAML，只修改 `rostopic`，噪声参数仍使用第 5 节 Allan 结果：
 
 ```bash
-cat > /mnt/data/slam/my_umi_rosbag/1_allan/imu_xv_rgb_imu_calib.yaml <<'EOF'
+cat > ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan/imu_xv_rgb_imu_calib.yaml <<'EOF'
 accelerometer_noise_density: 0.011362633638908732
 accelerometer_random_walk: 0.0003604781951727939
 gyroscope_noise_density: 0.00013340717339568767
@@ -524,15 +528,15 @@ EOF
 
 ```bash
 # 相机和 IMU-camera 标定数据目录，目录内应包含 xv_rgb_imu_calib.bag。
-CALIB_ROOT=/mnt/data/slam/my_umi_rosbag/3
+CALIB_ROOT=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3
 # AprilGrid 标定板参数文件，需要与实际标定板尺寸一致。
-TARGET=/mnt/data/slam/my_umi_rosbag/april_6x6.yaml
+TARGET=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/april_6x6.yaml
 # 与 xv_rgb_imu_calib.bag topic 匹配的 IMU 噪声参数文件。
-IMU_YAML=/mnt/data/slam/my_umi_rosbag/1_allan/imu_xv_rgb_imu_calib.yaml
+IMU_YAML=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan/imu_xv_rgb_imu_calib.yaml
 # 第 6 节相机内参与畸变标定输出的相机链文件。
-CAMCHAIN=/mnt/data/slam/my_umi_rosbag/3/xv_rgb_imu_calib-camchain.yaml
+CAMCHAIN=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3/xv_rgb_imu_calib-camchain.yaml
 # 标定日志文件。
-LOG=/mnt/data/slam/my_umi_rosbag/3/imu_camera_calibration_full.log
+LOG=${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3/imu_camera_calibration_full.log
 
 test -f "$TARGET"
 test -f "$IMU_YAML"
@@ -589,28 +593,35 @@ cam0 to imu0 time: [s] (t_imu = t_cam + shift)
 
 结果文件包括：
 
-- `/mnt/data/slam/my_umi_rosbag/3/xv_rgb_imu_calib-camchain-imucam.yaml`
-- `/mnt/data/slam/my_umi_rosbag/3/xv_rgb_imu_calib-imu.yaml`
-- `/mnt/data/slam/my_umi_rosbag/3/xv_rgb_imu_calib-results-imucam.txt`
-- `/mnt/data/slam/my_umi_rosbag/3/xv_rgb_imu_calib-report-imucam.pdf`
+- `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3/xv_rgb_imu_calib-camchain-imucam.yaml`
+- `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3/xv_rgb_imu_calib-imu.yaml`
+- `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3/xv_rgb_imu_calib-results-imucam.txt`
+- `${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3/xv_rgb_imu_calib-report-imucam.pdf`
 
 这些文件由 Docker 容器写出时，所有者可能是 `root`。如果后续需要直接编辑，可在宿主机上执行：
 
 ```bash
-sudo chown "$USER:$USER" /mnt/data/slam/my_umi_rosbag/3/xv_rgb_imu_calib-*imucam* \
-  /mnt/data/slam/my_umi_rosbag/3/xv_rgb_imu_calib-imu.yaml
+sudo chown "$USER:$USER" ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3/xv_rgb_imu_calib-*imucam* \
+  ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/3/xv_rgb_imu_calib-imu.yaml
 ```
 
 如果结果不稳定，优先检查 AprilGrid 覆盖、运动激励、图像曝光、IMU 时间戳单位和 CSV 字段顺序。
 
 ## 8. 写入 ORB-SLAM3 配置
 
-复制模板并保留模板文件：
+仓库只保留两份 XV 单目惯性运行配置：
+
+- `XV_RGB_Fisheye_calibrated.yaml`：输入包含 equidistant 畸变的原始或注册图像；
+- `XV_RGB_Fisheye_undistorted.yaml`：输入为 XV SDK 已校正的理想针孔图像。
+
+先确认当前设备的原始 Kalibr 文件和目标配置存在：
 
 ```bash
-PKG=/home/scl/work/slam/ORB_SLAM3_ROS2
-cp "$PKG/config/monocular-inertial/XV_RGB_Fisheye.yaml" \
-   "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml"
+PKG=$HOME/work/slam/ORB_SLAM3_ROS2
+KALIBR=$HOME/ros2_ws/src/xv_sdk_ros2/config/kalibr_data-camchain-imucam.yaml
+
+test -s "$KALIBR"
+test -s "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml"
 ```
 
 在 `XV_RGB_Fisheye_calibrated.yaml` 中替换：
@@ -642,7 +653,8 @@ IMU.T_b_c1: !!opencv-matrix
           0.0, 0.0, 0.0, 1.0]
 ```
 
-如果 Kalibr 输出矩阵为 `T_cam_imu` 且报告语义为 IMU 到相机，直接写入上面的 `data`。如果报告语义为相机到 IMU，先求逆：
+如果 Kalibr 输出矩阵为标准 `T_cam_imu`，且报告语义为 IMU 到相机，需要先求逆再写入
+上面的 `data`。如果报告给出的矩阵语义为相机到 IMU，可以直接写入：
 
 ```python
 """将 Kalibr 4x4 外参矩阵求逆，便于写入 ORB-SLAM3 IMU.T_b_c1。"""
@@ -663,14 +675,14 @@ print(T_inv)
 ## 9. 构建当前项目
 
 ```bash
-cd /home/scl/work/slam/ORB_SLAM3_ROS2
+cd $HOME/work/slam/ORB_SLAM3_ROS2
 source /opt/ros/jazzy/setup.bash
 
 colcon build --symlink-install --packages-select orbslam3 \
   --cmake-args \
   -DPython3_EXECUTABLE=/usr/bin/python3 \
   -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 \
-  -DORB_SLAM3_ROOT_DIR=/home/scl/work/slam/ORB_SLAM3
+  -DORB_SLAM3_ROOT_DIR=$HOME/work/slam/ORB_SLAM3
 
 source install/local_setup.bash
 ```
@@ -683,9 +695,9 @@ source install/local_setup.bash
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source /home/scl/work/slam/ORB_SLAM3_ROS2/install/local_setup.bash
+source $HOME/work/slam/ORB_SLAM3_ROS2/install/local_setup.bash
 
-PKG=/home/scl/work/slam/ORB_SLAM3_ROS2
+PKG=$HOME/work/slam/ORB_SLAM3_ROS2
 ros2 run orbslam3 monocular-inertial \
   "$PKG/vocabulary/ORBvoc.txt" \
   "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml" \
@@ -698,7 +710,7 @@ ros2 run orbslam3 monocular-inertial \
 播放目标 bag：
 
 ```bash
-ros2 bag play /mnt/data/slam/my_umi_rosbag/2_filtered_vins_aux \
+ros2 bag play ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/2_filtered_vins_aux \
   --topics \
   /xv_sdk/SN250801DR48FB26001253/rgb/image \
   /xv_sdk/SN250801DR48FB26001253/imu
@@ -749,25 +761,25 @@ ros2 run orbslam3 monocular-inertial \
 如果运行 `allan_variance_ros2` 时出现类似错误：
 
 ```text
-/home/scl/allan_ws/install/allan_variance_ros2/lib/allan_variance_ros2/allan_variance: /home/ai/anaconda3/lib/libstdc++.so.6: version `GLIBCXX_3.4.32' not found
+$HOME/allan_ws/install/allan_variance_ros2/lib/allan_variance_ros2/allan_variance: $HOME/anaconda3/lib/libstdc++.so.6: version `GLIBCXX_3.4.32' not found
 ```
 
-说明当前进程加载了 Anaconda 的 `libstdc++.so.6`。ROS 2 Jazzy 和 Allan 工具需要系统 GCC 对应的 `libstdc++`。如果 `allan_variance` 是在带 Anaconda 路径的环境中构建的，CMake 可能已经把 `/home/ai/anaconda3/lib` 写入二进制 `RUNPATH`，此时只清理 `LD_LIBRARY_PATH` 仍然无效。
+说明当前进程加载了 Anaconda 的 `libstdc++.so.6`。ROS 2 Jazzy 和 Allan 工具需要系统 GCC 对应的 `libstdc++`。如果 `allan_variance` 是在带 Anaconda 路径的环境中构建的，CMake 可能已经把 `$HOME/anaconda3/lib` 写入二进制 `RUNPATH`，此时只清理 `LD_LIBRARY_PATH` 仍然无效。
 
 先检查二进制链接路径：
 
 ```bash
-readelf -d /home/scl/allan_ws/install/allan_variance_ros2/lib/allan_variance_ros2/allan_variance | grep -E "RPATH|RUNPATH"
-ldd /home/scl/allan_ws/install/allan_variance_ros2/lib/allan_variance_ros2/allan_variance | grep libstdc++
+readelf -d $HOME/allan_ws/install/allan_variance_ros2/lib/allan_variance_ros2/allan_variance | grep -E "RPATH|RUNPATH"
+ldd $HOME/allan_ws/install/allan_variance_ros2/lib/allan_variance_ros2/allan_variance | grep libstdc++
 ```
 
-如果输出中出现 `/home/ai/anaconda3/lib`，清理构建产物后用干净环境重建：
+如果输出中出现 `$HOME/anaconda3/lib`，清理构建产物后用干净环境重建：
 
 ```bash
-rm -rf /home/scl/allan_ws/build /home/scl/allan_ws/install /home/scl/allan_ws/log
+rm -rf $HOME/allan_ws/build $HOME/allan_ws/install $HOME/allan_ws/log
 
-cd /home/scl/allan_ws
-env -i HOME=/home/scl USER=scl SHELL=/bin/bash TERM="${TERM:-xterm}" \
+cd $HOME/allan_ws
+env -i HOME=$HOME USER=scl SHELL=/bin/bash TERM="${TERM:-xterm}" \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   bash --noprofile --norc -c "\
     source /opt/ros/jazzy/setup.bash && \
@@ -777,11 +789,11 @@ env -i HOME=/home/scl USER=scl SHELL=/bin/bash TERM="${TERM:-xterm}" \
 重建后确认应看到系统库路径，且 `RUNPATH` 不应包含 Anaconda：
 
 ```bash
-readelf -d /home/scl/allan_ws/install/allan_variance_ros2/lib/allan_variance_ros2/allan_variance | grep -E "RPATH|RUNPATH"
-ldd /home/scl/allan_ws/install/allan_variance_ros2/lib/allan_variance_ros2/allan_variance | grep libstdc++
+readelf -d $HOME/allan_ws/install/allan_variance_ros2/lib/allan_variance_ros2/allan_variance | grep -E "RPATH|RUNPATH"
+ldd $HOME/allan_ws/install/allan_variance_ros2/lib/allan_variance_ros2/allan_variance | grep libstdc++
 ```
 
-期望输出中的 `libstdc++.so.6` 来自 `/usr/lib/x86_64-linux-gnu/` 或 `/lib/x86_64-linux-gnu/`，不应来自 `/home/ai/anaconda3/lib/`。
+期望输出中的 `libstdc++.so.6` 来自 `/usr/lib/x86_64-linux-gnu/` 或 `/lib/x86_64-linux-gnu/`，不应来自 `$HOME/anaconda3/lib/`。
 
 ### analysis.py 加载 Anaconda matplotlib/numpy 失败
 
@@ -795,12 +807,12 @@ ImportError: numpy.core.multiarray failed to import
 说明 `python3` 或 `PYTHONPATH` 使用了 Anaconda 的 Python 包。使用系统 Python 和干净环境运行分析脚本：
 
 ```bash
-cd /mnt/data/slam/my_umi_rosbag/1_allan
+cd ${ORB_SLAM3_DATA_ROOT:-$HOME/datasets/rosbag}/1_allan
 
 env -i HOME="$HOME" USER="$USER" MPLBACKEND=Agg \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   /usr/bin/python3 \
-    /home/scl/allan_ws/src/allan_variance_ros2/src/allan_variance_ros2/scripts/analysis.py \
+    $HOME/allan_ws/src/allan_variance_ros2/src/allan_variance_ros2/scripts/analysis.py \
     --data allan_variance.csv \
     --config xv_imu_allan.yaml \
     > analysis.log 2>&1

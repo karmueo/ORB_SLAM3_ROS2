@@ -3,8 +3,10 @@
  * @brief 启动单目惯性 ORB_SLAM3 ROS 2 节点，并管理 ROS 与 SLAM 系统生命周期。
  */
 
-#include <iostream>
+#include <exception>
 #include <fstream>
+#include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 
@@ -63,7 +65,22 @@ int main(int argc, char** argv)
     bool runtimeFailed = false;
     {
         /** @brief ROS 2 单目惯性节点，作用域结束时先于 ROS shutdown 释放。 */
-        auto node = std::make_shared<MonocularInertialNode>(&SLAM, settingsFile);
+        std::shared_ptr<MonocularInertialNode> node;
+        try
+        {
+            node = std::make_shared<MonocularInertialNode>(&SLAM, settingsFile);
+        }
+        catch (const std::exception& exception)
+        {
+            std::cerr << "Error: failed to initialize monocular-inertial node: "
+                      << exception.what() << std::endl;
+            SLAM.Shutdown();
+            if (rclcpp::ok())
+            {
+                rclcpp::shutdown();
+            }
+            return 1;
+        }
         std::cout << "============================" << std::endl;
         std::cout << "Monocular-Inertial" << std::endl;
 

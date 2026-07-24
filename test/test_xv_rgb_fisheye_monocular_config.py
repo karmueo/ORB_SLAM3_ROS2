@@ -19,6 +19,12 @@ LAUNCH_PATH = (
     / "launch"
     / "xv_rgb_fisheye_undistorted_mono.launch.py"
 )
+# 自有数据集和多种图像配置共用的纯单目 launch 文件路径。
+DATASET_LAUNCH_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "launch"
+    / "xv_rgb_fisheye_mono.launch.py"
+)
 # 纯单目 RViz2 配置路径。
 RVIZ_CONFIG_PATH = (
     Path(__file__).resolve().parents[1]
@@ -122,4 +128,96 @@ def test_rviz_uses_compact_pose_axes_and_remapped_camera_image() -> None:
     assert "Name: Camera Image" in rviz_config
     assert "Reliability Policy: Best Effort" in rviz_config
     assert "Value: /orbslam3/input_image" in rviz_config
+    assert "Fixed Frame: camera_start" in rviz_config
+    assert "camera_start:" in rviz_config
     assert 'remappings=[("/orbslam3/input_image", camera_topic)]' in launch_source
+
+
+def test_monocular_uses_default_native_feature_mask() -> None:
+    """纯单目 launch 应默认加载 mask.png，并把原图和 mask 分开传入 ORB-SLAM3。"""
+    # 用于验证默认掩膜资源和参数传递的 launch 文件文本。
+    launch_source = LAUNCH_PATH.read_text(encoding="utf-8")
+    # 纯单目节点实现路径。
+    node_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "monocular"
+        / "monocular-slam-node.cpp"
+    )
+    # 用于验证原生掩膜调用且未修改输入帧的节点实现文本。
+    node_source = node_path.read_text(encoding="utf-8")
+
+    assert '"mask.png"' in launch_source
+    assert '"XV_RGB_Fisheye_gripper_mask.png"' not in launch_source
+    assert (
+        "m_SLAM->TrackMonocular(\n"
+        "            m_cvImPtr->image, m_feature_mask, timestamp_seconds)"
+        in node_source
+    )
+    assert "ApplyFeatureMask" not in node_source
+
+
+def test_monocular_ros_pose_output_can_be_disabled() -> None:
+    """纯单目应默认发布 ROS 位姿，并支持关闭全部定位输出。"""
+    # 用于验证 launch 参数声明和布尔类型传递的源码文本。
+    launch_source = LAUNCH_PATH.read_text(encoding="utf-8")
+    # 纯单目节点实现路径。
+    node_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "monocular"
+        / "monocular-slam-node.cpp"
+    )
+    # 用于验证发布器条件创建和跟踪短路顺序的节点源码文本。
+    node_source = node_path.read_text(encoding="utf-8")
+
+    assert 'LaunchConfiguration("publish_ros_pose")' in launch_source
+    assert '"publish_ros_pose": ParameterValue(' in launch_source
+    assert "publish_ros_pose, value_type=bool" in launch_source
+    assert (
+        '"publish_ros_pose",\n'
+        '                default_value="true"'
+        in launch_source
+    )
+    assert 'declare_parameter<bool>("publish_ros_pose", true)' in node_source
+    assert "if (m_publish_ros_pose)" in node_source
+    assert "if (!m_publish_ros_pose)" in node_source
+    assert "Monocular ROS pose output is disabled" in node_source
+
+    # 三个源码位置用于验证关闭开关不会跳过 SLAM 跟踪。
+    track_index = node_source.index("m_SLAM->TrackMonocular(")
+    disabled_guard_index = node_source.index("if (!m_publish_ros_pose)")
+    tracking_state_index = node_source.index("m_SLAM->GetTrackingState()")
+    assert track_index < disabled_guard_index < tracking_state_index
+
+
+def test_dataset_monocular_launch_supports_configurable_slam_and_rviz() -> None:
+    """自有数据集 launch 应统一配置 mono、mask、位姿输出和 RViz2 视频。"""
+    # 通用纯单目 launch 源码文本。
+    launch_source = DATASET_LAUNCH_PATH.read_text(encoding="utf-8")
+
+    # 必须同时声明并读取的通用 launch 参数名称。
+    expected_arguments = (
+        "vocabulary_path",
+        "settings_path",
+        "camera_topic",
+        "feature_mask_path",
+        "max_path_length",
+        "publish_ros_pose",
+        "use_viewer",
+        "use_rviz",
+        "rviz_config_path",
+    )
+    for argument_name in expected_arguments:
+        assert f'LaunchConfiguration("{argument_name}")' in launch_source
+        assert f'"{argument_name}",' in launch_source
+
+    assert '"XV_RGB_Fisheye_calibrated.yaml"' in launch_source
+    assert '"/xv_sdk/SN250801DR48FB26001253/rgb/image"' in launch_source
+    assert '"fisheye_mask.png"' in launch_source
+    assert '"publish_ros_pose": ParameterValue(' in launch_source
+    assert "publish_ros_pose, value_type=bool" in launch_source
+    assert 'remappings=[("camera", camera_topic)]' in launch_source
+    assert 'remappings=[("/orbslam3/input_image", camera_topic)]' in launch_source
+    assert "condition=IfCondition(use_rviz)" in launch_source
+    assert '"xv_rgb_fisheye_undistorted_mono.rviz"' in launch_source

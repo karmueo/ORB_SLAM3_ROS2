@@ -20,8 +20,8 @@ using std::placeholders::_1;
 
 namespace
 {
-/** @brief ORB-SLAM3 世界坐标系对应的 ROS frame 名称。 */
-constexpr const char* kMapFrameId = "map";
+/** @brief 与 ORB-SLAM3 初始化首帧相机坐标系重合的 ROS 参考 frame 名称。 */
+constexpr const char* kCameraStartFrameId = "camera_start";
 /** @brief ROS 标准相机机体坐标系名称。 */
 constexpr const char* kCameraLinkFrameId = "camera_link";
 /** @brief ORB/OpenCV 相机光学坐标系对应的 ROS frame 名称。 */
@@ -40,6 +40,7 @@ MonocularSlamNode::MonocularSlamNode(ORB_SLAM3::System* pSLAM)
 : Node("ORB_SLAM3_ROS2"),
   m_SLAM(pSLAM),
   m_feature_mask_size_validated(false),
+  m_publish_ros_pose(true),
   m_max_path_length(0U)
 {
     if (m_SLAM == nullptr)
@@ -51,6 +52,8 @@ MonocularSlamNode::MonocularSlamNode(ORB_SLAM3::System* pSLAM)
     const std::string feature_mask_path =
         this->declare_parameter<std::string>("feature_mask_path", "");
     m_feature_mask = orbslam3_ros2::LoadFeatureMask(feature_mask_path);
+    m_publish_ros_pose =
+        this->declare_parameter<bool>("publish_ros_pose", true);
 
     /** @brief ROS 参数中配置的最大轨迹长度。 */
     const std::int64_t configured_max_path_length =
@@ -76,41 +79,50 @@ MonocularSlamNode::MonocularSlamNode(ORB_SLAM3::System* pSLAM)
             excluded_percent);
     }
 
-    m_pose_publisher = this->create_publisher<PoseStampedMsg>(
-        "/orbslam3/camera_pose", 10);
-    m_path_publisher = this->create_publisher<PathMsg>(
-        "/orbslam3/camera_path", rclcpp::QoS(1).reliable());
-    m_dynamic_tf_broadcaster =
-        std::make_unique<tf2_ros::TransformBroadcaster>(*this);
-    m_static_tf_broadcaster =
-        std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
-    m_camera_path.header.frame_id = kMapFrameId;
+    if (m_publish_ros_pose)
+    {
+        m_pose_publisher = this->create_publisher<PoseStampedMsg>(
+            "/orbslam3/camera_pose", 10);
+        m_path_publisher = this->create_publisher<PathMsg>(
+            "/orbslam3/camera_path", rclcpp::QoS(1).reliable());
+        m_dynamic_tf_broadcaster =
+            std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        m_static_tf_broadcaster =
+            std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+        m_camera_path.header.frame_id = kCameraStartFrameId;
 
-    /** @brief 静态 TF 使用的节点时钟时间戳。 */
-    const builtin_interfaces::msg::Time static_transform_stamp =
-        this->now();
-    /** @brief camera_optical_frame 在 camera_link 中的固定姿态消息。 */
-    const PoseStampedMsg optical_pose_message = CreateCameraPoseMessage(
-        ComputeCameraOpticalPoseInCameraLink(),
-        static_transform_stamp,
-        kCameraLinkFrameId);
-    /** @brief camera_link 到 camera_optical_frame 的静态 TF 消息。 */
-    const geometry_msgs::msg::TransformStamped optical_transform_message =
-        CreateCameraTransformMessage(
-            optical_pose_message, kCameraOpticalFrameId);
-    m_static_tf_broadcaster->sendTransform(optical_transform_message);
+        /** @brief 静态 TF 使用的节点时钟时间戳。 */
+        const builtin_interfaces::msg::Time static_transform_stamp =
+            this->now();
+        /** @brief camera_optical_frame 在 camera_link 中的固定姿态消息。 */
+        const PoseStampedMsg optical_pose_message = CreateCameraPoseMessage(
+            ComputeCameraOpticalPoseInCameraLink(),
+            static_transform_stamp,
+            kCameraLinkFrameId);
+        /** @brief camera_link 到 camera_optical_frame 的静态 TF 消息。 */
+        const geometry_msgs::msg::TransformStamped optical_transform_message =
+            CreateCameraTransformMessage(
+                optical_pose_message, kCameraOpticalFrameId);
+        m_static_tf_broadcaster->sendTransform(optical_transform_message);
 
-    RCLCPP_INFO(
-        this->get_logger(),
-        "Monocular localization output: pose=/orbslam3/camera_pose, "
-        "path=/orbslam3/camera_path, dynamic_tf=%s->%s, "
-        "static_tf=%s->%s, axes=x-forward/y-left/z-up, "
-        "max_path_length=%zu",
-        kMapFrameId,
-        kCameraLinkFrameId,
-        kCameraLinkFrameId,
-        kCameraOpticalFrameId,
-        m_max_path_length);
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Monocular ROS pose output is enabled: "
+            "pose=/orbslam3/camera_pose, path=/orbslam3/camera_path, "
+            "dynamic_tf=%s->%s, static_tf=%s->%s, "
+            "axes=x-forward/y-left/z-up, max_path_length=%zu",
+            kCameraStartFrameId,
+            kCameraLinkFrameId,
+            kCameraLinkFrameId,
+            kCameraOpticalFrameId,
+            m_max_path_length);
+    }
+    else
+    {
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Monocular ROS pose output is disabled by publish_ros_pose=false");
+    }
 
     m_image_subscriber = this->create_subscription<ImageMsg>(
         "camera",
@@ -158,19 +170,21 @@ void MonocularSlamNode::GrabImage(const ImageMsg::SharedPtr msg)
 
     /** @brief 当前图像时间戳，单位为秒。 */
     const double timestamp_seconds = Utility::StampToSec(msg->header.stamp);
-    /** @brief 清除掩膜排除区域后的跟踪图像。 */
-    const cv::Mat tracking_image =
-        orbslam3_ros2::ApplyFeatureMask(m_cvImPtr->image, m_feature_mask);
     /** @brief ORB-SLAM3 返回的世界到相机位姿。 */
     Sophus::SE3f Tcw;
     try
     {
-        Tcw = m_SLAM->TrackMonocular(tracking_image, timestamp_seconds);
+        Tcw = m_SLAM->TrackMonocular(
+            m_cvImPtr->image, m_feature_mask, timestamp_seconds);
     }
     catch (const cv::Exception& exception)
     {
         RCLCPP_FATAL(this->get_logger(), "ORB-SLAM3 feature mask error: %s", exception.what());
         rclcpp::shutdown();
+        return;
+    }
+    if (!m_publish_ros_pose)
+    {
         return;
     }
 
@@ -199,7 +213,7 @@ void MonocularSlamNode::GrabImage(const ImageMsg::SharedPtr msg)
 }
 
 /**
- * @brief 发布 ROS map 系下的 camera_link 位姿、轨迹和动态 TF。
+ * @brief 发布 ROS camera_start 系下的 camera_link 位姿、轨迹和动态 TF。
  * @param Tcw ORB-SLAM3 返回的世界到相机位姿。
  * @param stamp 当前输入图像时间戳。
  * @param reset_path 发布前是否清空历史轨迹。
@@ -211,13 +225,13 @@ void MonocularSlamNode::PublishCameraPose(
 {
     /** @brief ORB 世界系下的当前相机光学位姿。 */
     const Sophus::SE3f Twc = ComputeCameraPoseInWorld(Tcw);
-    /** @brief ROS map 系下 x 前、y 左、z 上的 camera_link 位姿。 */
-    const Sophus::SE3f map_from_camera_link =
+    /** @brief ROS camera_start 系下 x 前、y 左、z 上的 camera_link 位姿。 */
+    const Sophus::SE3f camera_start_from_camera_link =
         ConvertOrbCameraPoseToRos(Twc);
     /** @brief 当前帧 ROS camera_link 位姿消息。 */
     const PoseStampedMsg pose_message =
         CreateCameraPoseMessage(
-            map_from_camera_link, stamp, kMapFrameId);
+            camera_start_from_camera_link, stamp, kCameraStartFrameId);
     UpdateCameraPath(
         pose_message, m_max_path_length, reset_path, &m_camera_path);
     /** @brief 与当前相机位姿严格一致的动态 TF 消息。 */

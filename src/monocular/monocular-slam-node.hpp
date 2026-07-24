@@ -25,7 +25,7 @@
 #include "utility.hpp"
 
 /**
- * @brief 订阅单目图像，清除掩膜排除区域，并发布相机位姿、轨迹和 TF。
+ * @brief 订阅单目图像，传递特征掩膜，并发布相机位姿、轨迹和 TF。
  */
 class MonocularSlamNode : public rclcpp::Node
 {
@@ -56,7 +56,7 @@ private:
     void GrabImage(const ImageMsg::SharedPtr msg);
 
     /**
-     * @brief 发布 ROS map 系下的 camera_link 位姿、轨迹和动态 TF。
+     * @brief 发布 ROS camera_start 系下的 camera_link 位姿、轨迹和动态 TF。
      * @param Tcw ORB-SLAM3 返回的世界到相机位姿。
      * @param stamp 当前输入图像时间戳。
      * @param reset_path 发布前是否清空历史轨迹。
@@ -78,19 +78,22 @@ private:
     /** @brief 是否已使用首帧完成掩膜尺寸校验。 */
     bool m_feature_mask_size_validated;
 
+    /** @brief 是否发布 ROS 2 位姿、轨迹和 TF 定位输出。 */
+    bool m_publish_ros_pose;
+
     /** @brief ROS 轨迹允许保留的最大有效位姿数量，0 表示无限累计。 */
     std::size_t m_max_path_length;
 
     /** @brief 相机图像订阅器。 */
     rclcpp::Subscription<ImageMsg>::SharedPtr m_image_subscriber;
 
-    /** @brief ROS map 系下实时 camera_link 位姿发布器。 */
+    /** @brief ROS camera_start 系下实时 camera_link 位姿发布器。 */
     rclcpp::Publisher<PoseStampedMsg>::SharedPtr m_pose_publisher;
 
-    /** @brief 世界系下有界相机轨迹发布器。 */
+    /** @brief camera_start 系下有界相机轨迹发布器。 */
     rclcpp::Publisher<PathMsg>::SharedPtr m_path_publisher;
 
-    /** @brief map 到 camera_link 的动态 TF 广播器。 */
+    /** @brief camera_start 到 camera_link 的动态 TF 广播器。 */
     std::unique_ptr<tf2_ros::TransformBroadcaster> m_dynamic_tf_broadcaster;
 
     /** @brief camera_link 到 camera_optical_frame 的静态 TF 广播器。 */

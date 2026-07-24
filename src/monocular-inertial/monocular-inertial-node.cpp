@@ -13,7 +13,23 @@
 #include <iostream>
 #include <string>
 
+#include "monocular-feature-mask.hpp"
+
 using std::placeholders::_1;
+
+namespace
+{
+/** @brief ORB_SLAM3 世界坐标系对应的 ROS frame 名称。 */
+constexpr const char* kMapFrameId = "map";
+/** @brief Kalibr IMU 机体系对应的 ROS frame 名称。 */
+constexpr const char* kBodyFrameId = "body_link";
+/** @brief 输入图像未声明 frame_id 时使用的相机光学坐标系名称。 */
+constexpr const char* kFallbackCameraFrameId = "camera_optical_frame";
+/** @brief 默认保留的有效机体位姿数量。 */
+constexpr std::int64_t kDefaultMaxPathLength = 10000;
+/** @brief 惯性 BA1 完成后继续等待优化收敛的时长，单位为秒。 */
+constexpr double kInertialBa1SettlingDurationSec = 1.0;
+}  // namespace
 
 /** @brief 为 C++14 提供时基差值阈值常量的存储定义。 */
 constexpr double MonocularInertialNode::kMaxTimeBaseDifferenceSec;
@@ -26,9 +42,13 @@ constexpr double MonocularInertialNode::kMaxTimeBaseDifferenceSec;
 MonocularInertialNode::MonocularInertialNode(ORB_SLAM3::System* SLAM, const std::string& settingsFile) :
     Node("ORB_SLAM3_ROS2"),
     SLAM_(SLAM),
+    featureMask_(),
+    featureMaskSizeValidated_(false),
     stopSync_(false),
     maxImageQueueSize_(100U),
     targetImageFps_(0.0),
+    maxPathLength_(0U),
+    saveKeyframeTrajectory_(false),
     imageRateLimitState_{-1.0, 0.0, -1.0},
     lastImageTimestamp_(-1.0),
     lastImuTimestamp_(-1.0),
@@ -47,13 +67,50 @@ MonocularInertialNode::MonocularInertialNode(ORB_SLAM3::System* SLAM, const std:
     queuedImuCount_(0U),
     imuWaitCount_(0U),
     posePublishCount_(0U),
-    Tbc_()
+    ba1InitializedSinceSec_(-1.0),
+    Tbc_(),
+    pathResetState_(),
+    staticCameraTransformPublished_(false),
+    cameraFrameId_()
 {
+    /** @brief 静态特征掩膜文件路径，空路径表示禁用。 */
+    const std::string featureMaskPath =
+        this->declare_parameter<std::string>("feature_mask_path", "");
+    featureMask_ = orbslam3_ros2::LoadFeatureMask(featureMaskPath);
+
+    if (featureMask_.empty())
+    {
+        RCLCPP_INFO(this->get_logger(), "Monocular-inertial feature mask is disabled");
+    }
+    else
+    {
+        /** @brief 掩膜排除区域占输入图像的百分比。 */
+        const double excludedPercent =
+            orbslam3_ros2::CalculateExcludedRatio(featureMask_) * 100.0;
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Loaded monocular-inertial feature mask: path=%s, size=%dx%d, excluded=%.2f%%",
+            featureMaskPath.c_str(),
+            featureMask_.cols,
+            featureMask_.rows,
+            excludedPercent);
+    }
+
+    /** @brief ROS 参数中配置的最大轨迹长度。 */
+    const std::int64_t configuredMaxPathLength =
+        this->declare_parameter<std::int64_t>(
+            "max_path_length", kDefaultMaxPathLength);
+    maxPathLength_ = ValidateBodyMaxPathLength(configuredMaxPathLength);
+    saveKeyframeTrajectory_ =
+        this->declare_parameter<bool>("save_keyframe_trajectory", false);
+
     subImu_ = this->create_subscription<ImuMsg>("imu", 1000, std::bind(&MonocularInertialNode::GrabImu, this, _1));
     subImg_ = this->create_subscription<ImageMsg>("camera", 100, std::bind(&MonocularInertialNode::GrabImage, this, _1));
     posePub_ = this->create_publisher<PoseStampedMsg>("/orbslam3/body_pose", 10);
-    pathPub_ = this->create_publisher<PathMsg>("/orbslam3/path", 10);
-    pathMsg_.header.frame_id = "map";
+    pathPub_ = this->create_publisher<PathMsg>("/orbslam3/path", rclcpp::QoS(1).reliable());
+    dynamicTfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    staticTfBroadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+    pathMsg_.header.frame_id = kMapFrameId;
 
     /** @brief 外参读取失败原因。 */
     std::string errorMessage;
@@ -136,12 +193,21 @@ MonocularInertialNode::MonocularInertialNode(ORB_SLAM3::System* SLAM, const std:
         maxImageQueueSize_,
         imuTimeOffsetSec_,
         imuReorderWindowSec_);
+    RCLCPP_INFO(
+        this->get_logger(),
+        "单目惯性定位输出：pose=/orbslam3/body_pose，path=/orbslam3/path，"
+        "dynamic_tf=%s->%s，发布起点=惯性BA1连续稳定%.1f秒，max_path_length=%zu，save_keyframe_trajectory=%s",
+        kMapFrameId,
+        kBodyFrameId,
+        kInertialBa1SettlingDurationSec,
+        maxPathLength_,
+        saveKeyframeTrajectory_ ? "true" : "false");
 
     syncThread_ = std::thread(&MonocularInertialNode::SyncWithImu, this);
 }
 
 /**
- * @brief 停止同步线程，关闭 ORB_SLAM3 并保存关键帧轨迹。
+ * @brief 停止同步线程、关闭 ORB_SLAM3，并按配置保存关键帧轨迹。
  */
 MonocularInertialNode::~MonocularInertialNode()
 {
@@ -153,7 +219,16 @@ MonocularInertialNode::~MonocularInertialNode()
 
     SLAM_->Shutdown();
 
-    SLAM_->SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
+    if (saveKeyframeTrajectory_)
+    {
+        SLAM_->SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
+    }
+    else
+    {
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Skip saving KeyFrameTrajectory.txt because save_keyframe_trajectory=false");
+    }
 }
 
 /**
@@ -212,6 +287,11 @@ void MonocularInertialNode::GrabImu(const ImuMsg::SharedPtr msg)
  */
 void MonocularInertialNode::GrabImage(const ImageMsg::SharedPtr msg)
 {
+    if (!staticCameraTransformPublished_)
+    {
+        PublishStaticBodyCameraTransform(msg);
+    }
+
     if (!timeBaseValidated_.load())
     {
         /** @brief 当前待校验图像的原始时间戳，单位为秒。 */
@@ -510,10 +590,28 @@ void MonocularInertialNode::SyncWithImu()
             continue;
         }
 
+        if (!featureMask_.empty() && !featureMaskSizeValidated_)
+        {
+            /** @brief 首帧掩膜尺寸校验失败时的详细说明。 */
+            std::string errorMessage;
+            if (!orbslam3_ros2::ValidateFeatureMaskSize(
+                    featureMask_, im.size(), &errorMessage))
+            {
+                fatalError_.store(true);
+                RCLCPP_FATAL(this->get_logger(), "%s", errorMessage.c_str());
+                rclcpp::shutdown();
+                return;
+            }
+            featureMaskSizeValidated_ = true;
+            RCLCPP_INFO(
+                this->get_logger(),
+                "Monocular-inertial feature mask size validation passed");
+        }
+
         /** @brief 单帧跟踪开始时间。 */
         const std::chrono::steady_clock::time_point trackStart = std::chrono::steady_clock::now();
         /** @brief 当前帧世界系到相机系位姿。 */
-        const Sophus::SE3f Tcw = SLAM_->TrackMonocular(im, tIm, vImuMeas);
+        const Sophus::SE3f Tcw = SLAM_->TrackMonocular(im, featureMask_, tIm, vImuMeas);
         /** @brief 单帧跟踪结束时间。 */
         const std::chrono::steady_clock::time_point trackEnd = std::chrono::steady_clock::now();
         /** @brief 单帧跟踪耗时，单位为毫秒。 */
@@ -585,36 +683,82 @@ bool MonocularInertialNode::PublishBodyPose(const Sophus::SE3f& Tcw, const built
 {
     /** @brief ORB_SLAM3 当前跟踪状态。 */
     const int trackingState = SLAM_->GetTrackingState();
+    if (trackingState == ORB_SLAM3::Tracking::LOST)
+    {
+        pathResetState_.MarkTrackingLost();
+        return false;
+    }
     if (trackingState != ORB_SLAM3::Tracking::OK && trackingState != ORB_SLAM3::Tracking::OK_KLT)
     {
         return false;
     }
+    /** @brief 当前图像时间戳，供 BA1 稳定门控使用。 */
+    const double timestampSec = Utility::StampToSec(stamp);
+    /** @brief 当前地图是否已经完成 BA1 并持续稳定到允许发布。 */
+    const bool ba1PublishReady = UpdateInertialBa1PublishGate(
+        SLAM_->isInertialBA1Initialized(),
+        timestampSec,
+        kInertialBa1SettlingDurationSec,
+        &ba1InitializedSinceSec_);
+    if (!ba1PublishReady)
+    {
+        RCLCPP_INFO_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            5000,
+            "等待惯性 BA1 完成并连续稳定 %.1f 秒，暂停发布尚未收敛的 body 位姿",
+            kInertialBa1SettlingDurationSec);
+        return false;
+    }
 
-    /** @brief 世界系到机体系位姿。 */
+    /** @brief LOST 后恢复有效跟踪时是否需要清空旧轨迹。 */
+    const bool resetPath = pathResetState_.ConsumeResetRequest();
+    if (resetPath)
+    {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "单目惯性跟踪从 LOST 恢复，清空已发布的旧机体轨迹");
+    }
+
+    /** @brief 机体系在世界系中的位姿。 */
     const Sophus::SE3f Twb = ComputeBodyPoseFromCameraPose(Tcw, Tbc_);
-    /** @brief 世界系到机体系位姿四元数。 */
-    Eigen::Quaternionf quaternion = Twb.unit_quaternion();
-    quaternion.normalize();
-    /** @brief 世界系到机体系平移。 */
-    const Eigen::Vector3f translation = Twb.translation();
-
     /** @brief 当前帧机体系位姿消息。 */
-    PoseStampedMsg poseMsg;
-    poseMsg.header.stamp = stamp;
-    poseMsg.header.frame_id = "map";
-    poseMsg.pose.position.x = translation.x();
-    poseMsg.pose.position.y = translation.y();
-    poseMsg.pose.position.z = translation.z();
-    poseMsg.pose.orientation.x = quaternion.x();
-    poseMsg.pose.orientation.y = quaternion.y();
-    poseMsg.pose.orientation.z = quaternion.z();
-    poseMsg.pose.orientation.w = quaternion.w();
+    const PoseStampedMsg poseMsg =
+        CreateBodyPoseMessage(Twb, stamp, kMapFrameId);
+    UpdateBodyPath(poseMsg, maxPathLength_, resetPath, &pathMsg_);
+    /** @brief 与当前机体位姿严格一致的动态 TF 消息。 */
+    const geometry_msgs::msg::TransformStamped transformMsg =
+        CreateBodyTransformMessage(poseMsg, kBodyFrameId);
 
     posePub_->publish(poseMsg);
-    ++posePublishCount_;
-
-    pathMsg_.header.stamp = stamp;
-    pathMsg_.poses.push_back(poseMsg);
     pathPub_->publish(pathMsg_);
+    dynamicTfBroadcaster_->sendTransform(transformMsg);
+    ++posePublishCount_;
     return true;
+}
+
+/**
+ * @brief 使用首帧图像 frame_id 发布机体到相机光学系的静态 TF。
+ * @param msg 首帧输入图像消息。
+ */
+void MonocularInertialNode::PublishStaticBodyCameraTransform(const ImageMsg::SharedPtr& msg)
+{
+    cameraFrameId_ = msg->header.frame_id.empty()
+                         ? kFallbackCameraFrameId
+                         : msg->header.frame_id;
+    /** @brief 相机光学系在机体系中的位姿消息，对应配置中的 T_b_c。 */
+    const PoseStampedMsg cameraPoseMsg =
+        CreateBodyPoseMessage(Tbc_, msg->header.stamp, kBodyFrameId);
+    /** @brief 机体系到输入图像光学系的静态 TF。 */
+    const geometry_msgs::msg::TransformStamped cameraTransformMsg =
+        CreateBodyTransformMessage(cameraPoseMsg, cameraFrameId_);
+    staticTfBroadcaster_->sendTransform(cameraTransformMsg);
+    staticCameraTransformPublished_ = true;
+
+    RCLCPP_INFO(
+        this->get_logger(),
+        "发布相机静态 TF：%s->%s，frame_id 来源=%s",
+        kBodyFrameId,
+        cameraFrameId_.c_str(),
+        msg->header.frame_id.empty() ? "fallback" : "image header");
 }

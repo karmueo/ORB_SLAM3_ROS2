@@ -2,8 +2,9 @@
 
 #--------------------------------------------------------------------------------------------
 # XV RGB 鱼眼校正图像单目惯性配置。
-# 适配 xv_sdk_ros2 发布的 rgb_fisheye_undistorted/image；图像已由 SDK 使用 Kalibr
-# equidistant 参数校正为理想针孔图像，ORB-SLAM3 不再执行鱼眼去畸变。
+# 适配 xv_sdk_ros2 发布的 rgb_fisheye_undistorted/image；图像已由 SDK 使用
+# $HOME/ros2_ws/src/xv_sdk_ros2/config/kalibr_data-camchain-imucam.yaml
+# 中的 equidistant 参数校正为理想针孔图像，ORB-SLAM3 不再执行鱼眼去畸变。
 #--------------------------------------------------------------------------------------------
 File.version: "1.0"
 
@@ -56,6 +57,9 @@ IMU.T_b_c1: !!opencv-matrix
           0.0, 0.0, 0.0, 1.0]
 
 IMU.InsertKFsWhenLost: 0
+# 初始 IMU 对齐完成但 BA2 尚未完成时，短时跟踪失败先使用 RECENTLY_LOST 恢复窗口。
+IMU.DeferPreBA2TrackingReset: 1
+# 低运动阶段延后 LocalMapping 主动清图，给惯性初始化保留更多有效运动时间。
 IMU.DeferLowMotionReset: 1
 
 IMU.NoiseGyro: 0.00013340717339568767
@@ -86,4 +90,4 @@ Viewer.ViewpointX: 0.0
 Viewer.ViewpointY: -0.7
 Viewer.ViewpointZ: -3.5
 Viewer.ViewpointF: 500.0
-Viewer.imageViewScale: 2.0
+Viewer.imageViewScale: 0.7

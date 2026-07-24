@@ -1,4 +1,4 @@
-"""启动纯单目 ORB-SLAM3，并按需启动预配置的 RViz2。"""
+"""启动可配置的 XV RGB 鱼眼纯单目 SLAM，并按需启动 RViz2。"""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, Shutdown
@@ -10,31 +10,31 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description() -> LaunchDescription:
-    """构造 XV 已校正图像纯单目 SLAM 与可选 RViz2 的 launch 描述。"""
+    """构造支持原始或校正图像配置的纯单目 SLAM 与 RViz2 启动描述。"""
     # ORB-SLAM3 词典文件路径。
     vocabulary_path = LaunchConfiguration("vocabulary_path")
-    # 已校正针孔图像对应的纯单目配置文件路径。
+    # 当前图像模型对应的 ORB-SLAM3 配置文件路径。
     settings_path = LaunchConfiguration("settings_path")
-    # XV SDK 发布的已校正 RGB 图像 topic。
+    # mono 节点订阅的图像 topic。
     camera_topic = LaunchConfiguration("camera_topic")
-    # 与原始校正图像对齐的静态二值特征掩膜路径。
+    # 与输入图像逐像素对齐的静态特征掩膜路径。
     feature_mask_path = LaunchConfiguration("feature_mask_path")
     # ROS Path 最多保留的有效位姿数量。
     max_path_length = LaunchConfiguration("max_path_length")
     # 是否发布 ROS 2 位姿、轨迹和 TF。
     publish_ros_pose = LaunchConfiguration("publish_ros_pose")
-    # Pangolin viewer 字符串开关。
+    # 是否启用 Pangolin Viewer。
     use_viewer = LaunchConfiguration("use_viewer")
     # 是否启动 RViz2。
     use_rviz = LaunchConfiguration("use_rviz")
-    # RViz2 配置文件路径。
+    # RViz2 显示配置文件路径。
     rviz_config_path = LaunchConfiguration("rviz_config_path")
 
-    # 纯单目节点直接消费 SDK 已校正图像，不在消费端重复执行去畸变。
+    # mono 使用所选相机配置和 mask 跟踪同一个 camera_topic。
     orbslam_node = Node(
         package="orbslam3",
         executable="mono",
-        name="orbslam3_monocular_undistorted",
+        name="orbslam3_monocular",
         output="screen",
         emulate_tty=True,
         arguments=[vocabulary_path, settings_path, use_viewer],
@@ -53,7 +53,7 @@ def generate_launch_description() -> LaunchDescription:
         on_exit=Shutdown(reason="ORB-SLAM3 纯单目节点已退出"),
     )
 
-    # RViz2 默认关闭，启用后加载定位显示并跟随 camera_topic 订阅视频。
+    # RViz2 显示输入视频、camera_pose、camera_path 和 TF。
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
@@ -79,19 +79,18 @@ def generate_launch_description() -> LaunchDescription:
                     [
                         FindPackageShare("orbslam3"),
                         "config",
-                        "monocular",
-                        "XV_RGB_Fisheye_undistorted.yaml",
+                        "monocular-inertial",
+                        "XV_RGB_Fisheye_calibrated.yaml",
                     ]
                 ),
-                description="XV 已校正 RGB 图像的纯单目配置路径。",
+                description="输入图像模型对应的 ORB-SLAM3 mono 配置路径。",
             ),
             DeclareLaunchArgument(
                 "camera_topic",
                 default_value=(
-                    "/xv_sdk/SN250801DR48FB26001253/"
-                    "rgb_fisheye_undistorted/image"
+                    "/xv_sdk/SN250801DR48FB26001253/rgb/image"
                 ),
-                description="XV SDK 已校正 RGB 图像 topic。",
+                description="mono 和 RViz2 共同使用的输入图像 topic。",
             ),
             DeclareLaunchArgument(
                 "feature_mask_path",
@@ -100,13 +99,10 @@ def generate_launch_description() -> LaunchDescription:
                         FindPackageShare("orbslam3"),
                         "config",
                         "masks",
-                        "mask.png",
+                        "fisheye_mask.png",
                     ]
                 ),
-                description=(
-                    "1280x1280 二值特征掩膜路径；白色允许、黑色排除；"
-                    "默认使用 config/masks/mask.png。"
-                ),
+                description="与输入图像对齐的特征 mask；空字符串表示禁用。",
             ),
             DeclareLaunchArgument(
                 "max_path_length",
@@ -120,13 +116,13 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "use_viewer",
-                default_value="true",
-                description="是否启用 Pangolin viewer。",
+                default_value="false",
+                description="是否启用 Pangolin Viewer。",
             ),
             DeclareLaunchArgument(
                 "use_rviz",
                 default_value="false",
-                description="是否启动预配置的 RViz2。",
+                description="是否启动显示视频、位姿和轨迹的 RViz2。",
             ),
             DeclareLaunchArgument(
                 "rviz_config_path",
@@ -137,7 +133,7 @@ def generate_launch_description() -> LaunchDescription:
                         "xv_rgb_fisheye_undistorted_mono.rviz",
                     ]
                 ),
-                description="纯单目定位 RViz2 配置文件路径。",
+                description="纯单目视频、位姿、轨迹和 TF 的 RViz2 配置路径。",
             ),
             orbslam_node,
             rviz_node,

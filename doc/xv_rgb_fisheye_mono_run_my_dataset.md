@@ -1,254 +1,400 @@
 # XV RGB 鱼眼纯单目自有数据集运行教程
 
-本文记录在当前仓库中使用 ORB-SLAM3 `MONOCULAR` 模式跑通 `/home/scl/datasets/ros2bag/0707` 的最小链路。该流程只使用 XV RGB 鱼眼图像 topic：
+本文给出使用 ORB-SLAM3 `mono` 节点运行
+`$HOME/datasets/ros2bag/0722_slam` 的完整命令。按下面顺序打开终端并复制执行即可。
+默认使用 `xv_rgb_fisheye_mono.launch.py` 统一配置 mono、特征 mask、ROS 2 位姿输出和
+RViz2。
 
-```bash
-/xv_sdk/SN250801DR48FB26001253/rgb_registered/image
-```
-
-纯单目运行的核心区别如下：
-
-- 不订阅 IMU，也不使用配置文件中的 `IMU.*` 参数。
-- 不发布 `/orbslam3/body_pose` 或 `/orbslam3/path`。
-- 输出轨迹只有单目视觉尺度，轨迹尺度不能直接按真实米制理解。
-- 退出节点后只保存 `KeyFrameTrajectory.txt`。
-
-## 1. 数据集信息
-
-默认运行数据集为：
-
-```bash
-/home/scl/datasets/ros2bag/0707
-```
-
-先确认 bag 可读：
-
-```bash
-source /opt/ros/jazzy/setup.bash
-BAG=/home/scl/datasets/ros2bag/0707
-ros2 bag info "$BAG"
-```
-
-当前 bag 的关键信息为：
-
-- 存储格式：MCAP
-- ROS 发行版：Jazzy
-- 时长：约 `44.38 s`
-- 图像 topic：`/xv_sdk/SN250801DR48FB26001253/rgb_registered/image`
-- 图像消息数：`2664`
-- IMU topic：`/xv_sdk/SN250801DR48FB26001253/imu`
-- IMU 消息数：`21888`
-
-本文的纯单目流程只播放 RGB 图像 topic。bag 中虽然包含 IMU topic，`mono` 节点不会订阅它。
-
-## 2. 环境检查
-
-确认 ROS 2、本仓库、配置文件和词典存在：
-
-```bash
-source /opt/ros/jazzy/setup.bash
-
-PKG=/home/scl/work/slam/ORB_SLAM3_ROS2
-BAG=/home/scl/datasets/ros2bag/0707
-
-test -d "$PKG"
-test -d "$BAG"
-test -s "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated_resize_bag4.yaml"
-test -s "$PKG/vocabulary/ORBvoc.txt"
-```
-
-如果 `vocabulary/ORBvoc.txt` 不存在，但 `vocabulary/ORBvoc.txt.tar.gz` 存在，先解压词典：
-
-```bash
-cd "$PKG/vocabulary"
-tar -xzf ORBvoc.txt.tar.gz
-```
-
-确认运行数据包含目标图像 topic：
-
-```bash
-ros2 bag info "$BAG" | grep -E "/rgb/image|/imu"
-```
-
-期望至少看到：
+该流程使用图像 topic：
 
 ```text
-/xv_sdk/SN250801DR48FB26001253/rgb_registered/image
-/xv_sdk/SN250801DR48FB26001253/imu
+/xv_sdk/SN250801DR48FB26001253/rgb/image
 ```
 
-确认 `mono` 可执行已安装：
+运行结果包括：
+
+- `/orbslam3/camera_pose`：当前相机位姿；
+- `/orbslam3/camera_path`：累计相机轨迹；
+- `camera_start -> camera_link`：动态 TF；
+- `camera_link -> camera_optical_frame`：静态 TF；
+- `KeyFrameTrajectory.txt`：节点退出时保存的关键帧轨迹。
+
+`camera_start` 与 ORB-SLAM3 成功建图时选定的初始化首帧相机坐标系重合。
+该初始化帧可能晚于 bag 的第一张图像，例如特征不足或两视图初始化重试时会顺延。
+ROS Pose、Path 和动态 TF 采用 x 前、y 左、z 上的机体系约定；
+`KeyFrameTrajectory.txt` 保持 ORB-SLAM3 原生 TUM 光学坐标约定，原点仍对应同一初始化相机。
+
+纯单目轨迹没有真实尺度约束，适合检查跟踪稳定性和相对运动趋势。
+
+## 步骤 1：设置固定路径
+
+在终端中执行：
 
 ```bash
-source "$PKG/install/local_setup.bash"
-ros2 pkg executables orbslam3
+export SLAM_WS=$HOME/work/slam
+export ORB_SLAM3_ROOT=$HOME/work/slam/ORB_SLAM3
+export BAG=$HOME/datasets/ros2bag/0722_slam
+export RESULT_DIR=$HOME/results/orbslam3_mono_0722_slam
 ```
 
-输出中应包含：
+检查目录：
+
+```bash
+test -d "$SLAM_WS/ORB_SLAM3_ROS2"
+test -d "$ORB_SLAM3_ROOT"
+test -d "$BAG"
+test -s "$SLAM_WS/ORB_SLAM3_ROS2/vocabulary/ORBvoc.txt.tar.gz"
+```
+
+以上命令没有输出时表示路径有效。
+
+## 步骤 2：构建 ORB-SLAM3 和 ROS 2 包
+
+先构建 ORB-SLAM3 核心库：
+
+```bash
+cd $HOME/work/slam/ORB_SLAM3
+bash build.sh
+```
+
+然后构建 ROS 2 包：
+
+```bash
+cd $HOME/work/slam
+source /opt/ros/jazzy/setup.bash
+
+colcon build --symlink-install --packages-select orbslam3 \
+  --cmake-args \
+  -DPython3_EXECUTABLE=/usr/bin/python3 \
+  -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 \
+  -DORB_SLAM3_ROOT_DIR=$HOME/work/slam/ORB_SLAM3
+```
+
+加载构建结果并确认 `mono` 已安装：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source $HOME/work/slam/install/local_setup.bash
+
+ros2 pkg executables orbslam3 | grep '^orbslam3 mono$'
+```
+
+期望输出：
 
 ```text
 orbslam3 mono
 ```
 
-## 3. 配置文件说明
+如果没有输出，停在本步骤检查 `colcon build` 的错误信息，不要继续启动节点。
 
-本流程使用以下配置：
+## 步骤 3：检查 bag 和输入 topic
 
-```bash
-config/monocular-inertial/XV_RGB_Fisheye_calibrated_resize_bag4.yaml
-```
-
-选择该配置的原因是它已经包含 XV RGB 鱼眼相机模型、内参、畸变参数、`960x960` 内部 resize 和本次实测可用的 ORB 参数。虽然文件位于 `config/monocular-inertial/` 目录并包含 `IMU.*` 字段，但 `mono` 可执行以 `ORB_SLAM3::System::MONOCULAR` 初始化，运行时只使用相机、ORB 和 viewer 相关配置。
-
-## 4. 构建
-
-在当前仓库目录执行构建：
-
-```bash
-cd /home/scl/work/slam/ORB_SLAM3_ROS2
-source /opt/ros/jazzy/setup.bash
-
-colcon build --symlink-install --packages-select orbslam3
-```
-
-如果本机需要显式指定 ORB-SLAM3、OpenCV 或 Python 路径，可以追加项目常用 CMake 参数：
-
-```bash
-colcon build --symlink-install --packages-select orbslam3 \
-  --cmake-args \
-  -DPython3_EXECUTABLE=/usr/bin/python3 \
-  -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 \
-  -DORB_SLAM3_ROOT_DIR=/home/scl/work/slam/ORB_SLAM3
-```
-
-构建完成后加载工作空间，并确认可执行存在：
-
-```bash
-source install/local_setup.bash
-ros2 pkg executables orbslam3 | grep "orbslam3 mono"
-```
-
-## 5. 启动纯单目节点
-
-终端 1 启动 ORB-SLAM3 纯单目节点：
+执行：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source /home/scl/work/slam/ORB_SLAM3_ROS2/install/local_setup.bash
+export BAG=$HOME/datasets/ros2bag/0722_slam
 
-PKG=/home/scl/work/slam/ORB_SLAM3_ROS2
-xvfb-run -a ros2 run orbslam3 mono \
-  "$PKG/vocabulary/ORBvoc.txt" \
-  "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml" \
-  --ros-args \
-  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_registered/image
+ros2 bag info "$BAG"
 ```
 
-当前 `mono` 可执行中的 Pangolin viewer 写死为开启。SSH、远程终端或无显示环境建议使用 `xvfb-run -a`。如果在本地桌面环境运行，也可以去掉 `xvfb-run -a`。
+再单独确认目标图像 topic：
 
-节点启动后应完成 ORB vocabulary 加载，并开始等待 `camera` remap 后的图像输入。
+```bash
+ros2 bag info "$BAG" \
+  | grep '/xv_sdk/SN250801DR48FB26001253/rgb/image'
+```
 
-## 6. 播放 bag
+必须看到：
 
-终端 2 只播放 RGB 图像 topic。推荐先用 `0.5` 倍速，降低实时处理压力：
+```text
+/xv_sdk/SN250801DR48FB26001253/rgb/image
+```
+
+`mono` 节点不会订阅 bag 中的 IMU topic，因此播放时只选择图像即可。
+
+## 步骤 4：检查配置和 mask
+
+本数据集使用：
+
+```text
+config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml
+```
+
+该配置按 `1280 × 1280` 输入图像标定，并在 ORB-SLAM3 内部缩放到
+`960 × 960`。文件中的 `IMU.*` 字段在纯单目模式下不会参与计算。
+
+加载安装目录并检查资源：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source $HOME/work/slam/install/local_setup.bash
+
+export ORB_SHARE="$(ros2 pkg prefix orbslam3)/share/orbslam3"
+
+test -s "$ORB_SHARE/vocabulary/ORBvoc.txt"
+test -s "$ORB_SHARE/config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml"
+test -s "$ORB_SHARE/config/masks/fisheye_mask.png"
+file "$ORB_SHARE/config/masks/fisheye_mask.png"
+```
+
+`file` 应显示 mask 为 `1280 x 1280` 单通道灰度 PNG。
+
+Mask 像素规则：
+
+- `0`：排除该位置的 ORB 候选特征点；
+- 任意非零值：允许该位置的候选特征点。
+
+节点会保持原图不变，在 FAST 检出候选点后按 mask 过滤，再执行八叉树分配和描述子计算。
+mask 与首帧图像尺寸不一致、文件无法读取或 mask 全黑时，节点会打印错误并停止。
+
+## 步骤 5：终端 1 启动 mono 节点
+
+新开终端 1，完整复制以下命令：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source $HOME/work/slam/install/local_setup.bash
+
+export RESULT_DIR=$HOME/results/orbslam3_mono_0722_slam
+
+mkdir -p "$RESULT_DIR"
+cd "$RESULT_DIR"
+
+ros2 launch orbslam3 xv_rgb_fisheye_mono.launch.py \
+  use_viewer:=false \
+  use_rviz:=true \
+  2>&1 | tee mono_0722_slam.log
+```
+
+上述命令关闭 Pangolin Viewer，并打开 RViz2 显示输入视频、相机位姿、轨迹和 TF。
+SSH 或无显示环境将 `use_rviz` 改为 `false`。`publish_ros_pose` 默认为 `true`；改为
+`false` 后仍运行 SLAM 并在退出时保存 `KeyFrameTrajectory.txt`，但不会创建 ROS 2
+位姿、轨迹或 TF 接口。
+启动日志应包含：
+
+```text
+Vocabulary loaded!
+Loaded monocular feature mask
+Monocular
+```
+
+保持终端 1 运行。
+
+### 步骤 5.1：按输入类型覆盖 mono 配置
+
+`xv_rgb_fisheye_mono.launch.py` 的主要参数如下：
+
+| 参数 | 默认值 | 作用 |
+| --- | --- | --- |
+| `vocabulary_path` | 安装目录中的 `vocabulary/ORBvoc.txt` | 选择 ORB 词典。 |
+| `settings_path` | `config/monocular-inertial/XV_RGB_Fisheye_calibrated.yaml` | 选择与输入图像模型匹配的 mono 配置。 |
+| `camera_topic` | `/xv_sdk/SN250801DR48FB26001253/rgb/image` | 同时指定 mono 和 RViz2 的视频输入。 |
+| `feature_mask_path` | `config/masks/fisheye_mask.png` | 选择逐像素对齐的 mask；空字符串禁用。 |
+| `publish_ros_pose` | `true` | 控制 Pose、Path、动态 TF 和静态 TF。 |
+| `max_path_length` | `10000` | 限制 Path 位姿数；`0` 表示无限累计。 |
+| `use_viewer` | `false` | 控制 Pangolin Viewer。 |
+| `use_rviz` | `false` | 控制 RViz2 视频、位姿和轨迹显示。 |
+| `rviz_config_path` | 包内纯单目 RViz2 配置 | 选择自定义 RViz2 配置。 |
+
+输入 XV SDK 已校正图像时，复制执行：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source $HOME/work/slam/install/local_setup.bash
+
+export ORB_SHARE="$(ros2 pkg prefix orbslam3)/share/orbslam3"
+
+ros2 launch orbslam3 xv_rgb_fisheye_mono.launch.py \
+  settings_path:="$ORB_SHARE/config/monocular/XV_RGB_Fisheye_undistorted.yaml" \
+  camera_topic:=/xv_sdk/SN250801DR48FB26001253/rgb_fisheye_undistorted/image \
+  feature_mask_path:="$ORB_SHARE/config/masks/mask.png" \
+  use_viewer:=false \
+  use_rviz:=true
+```
+
+`settings_path`、`camera_topic` 和 `feature_mask_path` 必须描述同一种输入图像及相同的
+像素尺寸。原始鱼眼图像使用 `KannalaBrandt8` 配置，SDK 校正图像使用 `PinHole` 配置。
+
+## 步骤 6：终端 2 播放 bag
+
+新开终端 2，先用 `0.5` 倍速播放：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 
-ros2 bag play /home/scl/datasets/ros2bag/0707 \
+ros2 bag play $HOME/datasets/ros2bag/0722_slam \
   --rate 0.5 \
-  --topics /xv_sdk/SN250801DR48FB26001253/rgb_registered/image
+  --topics /xv_sdk/SN250801DR48FB26001253/rgb/image
 ```
 
-如果 `0.5` 倍速稳定，再尝试默认速度：
+等待 bag 播放完成。确认 `0.5` 倍速可以稳定运行后，下次可使用原速：
 
 ```bash
-ros2 bag play /home/scl/datasets/ros2bag/0707 \
-  --topics /xv_sdk/SN250801DR48FB26001253/rgb_registered/image
+source /opt/ros/jazzy/setup.bash
+
+ros2 bag play $HOME/datasets/ros2bag/0722_slam \
+  --topics /xv_sdk/SN250801DR48FB26001253/rgb/image
 ```
 
-## 7. 成功判据
+## 步骤 7：终端 3 检查实时输出
 
-一次可接受的 smoke test 应满足：
-
-- `mono` 节点完成词典加载。
-- 日志中出现一次 `New Map created`。
-- `one frame has been sent` 持续出现，表示图像已送入 ORB-SLAM3。
-- 不出现反复跟踪丢失或重置，例如连续打印 `Fail to track local map`、`Reset map`、`Relocalization`。
-- 停止 bag 并退出节点后生成非空 `KeyFrameTrajectory.txt`。
-
-可以把节点日志写入文件，方便检查：
+bag 正在播放时，新开终端 3 执行：
 
 ```bash
-xvfb-run -a ros2 run orbslam3 mono \
-  "$PKG/vocabulary/ORBvoc.txt" \
-  "$PKG/config/monocular-inertial/XV_RGB_Fisheye_calibrated_resize_bag4.yaml" \
-  --ros-args \
-  -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_registered/image \
-  2>&1 | tee mono_0707.log
+source /opt/ros/jazzy/setup.bash
+source $HOME/work/slam/install/local_setup.bash
+
+ros2 topic list \
+  | grep -E '^/orbslam3/(camera_pose|camera_path)$'
 ```
 
-运行后检查关键日志：
+期望看到：
 
-```bash
-grep -c "one frame has been sent" mono_0707.log
-grep -c "New Map created" mono_0707.log
-grep -E "Fail to track local map|Reset map|Relocalization" mono_0707.log
+```text
+/orbslam3/camera_path
+/orbslam3/camera_pose
 ```
 
-## 8. 本次实测结果
-
-使用上述配置和 `/home/scl/datasets/ros2bag/0707` 进行纯单目实测，结果摘要如下：
-
-- 送入图像帧数：`2664`
-- `New Map created` 次数：`1`
-- `Reset map` 次数：`0`
-- `Relocalization` 次数：`0`
-
-该结果说明当前图像 topic、相机配置和 ORB 参数能让纯单目链路稳定跑完此 bag。轨迹尺度仍然是纯单目尺度，不能作为真实米制轨迹直接使用。
-
-## 9. 轨迹文件检查
-
-`KeyFrameTrajectory.txt` 会写在启动 `mono` 节点时所在目录。建议在固定目录启动节点，方便归档结果。
-
-停止 bag 播放并退出节点后检查轨迹：
+检查位姿发布频率：
 
 ```bash
+ros2 topic hz /orbslam3/camera_pose
+```
+
+看到持续更新的频率后按 `Ctrl+C` 退出频率检查。
+
+如需检查 TF，再执行：
+
+```bash
+ros2 run tf2_ros tf2_echo camera_start camera_link
+```
+
+看到连续变换后按 `Ctrl+C` 退出。
+
+## 步骤 8：结束节点并保存轨迹
+
+先等待终端 2 的 bag 播放完成，再回到终端 1 按 `Ctrl+C`。
+
+节点正常退出时会在结果目录写入：
+
+```text
+$HOME/results/orbslam3_mono_0722_slam/KeyFrameTrajectory.txt
+```
+
+检查结果：
+
+```bash
+export RESULT_DIR=$HOME/results/orbslam3_mono_0722_slam
+cd "$RESULT_DIR"
+
 test -s KeyFrameTrajectory.txt
 wc -l KeyFrameTrajectory.txt
-head KeyFrameTrajectory.txt
+head -n 5 KeyFrameTrajectory.txt
 ```
 
-`test -s` 退出码为 0 表示文件存在且非空。`wc -l` 行数越多，通常表示成功跟踪的关键帧越多；具体质量需要结合轨迹形状、尺度和后续真值评估判断。
+再检查关键日志：
 
-## 10. 常见问题
+```bash
+cd $HOME/results/orbslam3_mono_0722_slam
 
-### 找不到 mono 可执行
+grep -c "New Map created" mono_0722_slam.log
+grep -E "Fail to track local map|Reset map|Relocalization" mono_0722_slam.log
+```
 
-重新 source 工作空间并检查可执行：
+`KeyFrameTrajectory.txt` 非空且运行期间能持续收到
+`/orbslam3/camera_pose`，说明纯单目链路已经跑通。日志中偶发一次跟踪失败可以结合
+轨迹连续性判断；持续失败或反复重建地图时，应先降低 bag 播放速度并重新运行步骤 5 至步骤 8。
+
+## 步骤 9：需要禁用 mask 时这样启动
+
+只在对比实验或 mask 与当前图像不匹配时使用本步骤。新开终端并执行：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source /home/scl/work/slam/ORB_SLAM3_ROS2/install/local_setup.bash
-ros2 pkg executables orbslam3 | grep "orbslam3 mono"
+source $HOME/work/slam/install/local_setup.bash
+
+export RESULT_DIR=$HOME/results/orbslam3_mono_0722_slam_no_mask
+
+mkdir -p "$RESULT_DIR"
+cd "$RESULT_DIR"
+
+ros2 launch orbslam3 xv_rgb_fisheye_mono.launch.py \
+  feature_mask_path:="" \
+  use_viewer:=false \
+  use_rviz:=true \
+  2>&1 | tee mono_0722_slam_no_mask.log
 ```
 
-如果没有输出，重新执行构建命令，并检查 CMake 输出中的 ORB_SLAM3、OpenCV 和 ROS 2 依赖路径。
+日志应包含：
 
-### 没有 /orbslam3/body_pose 输出
+```text
+Monocular feature mask is disabled
+```
 
-这是当前纯单目节点的预期行为。`/orbslam3/body_pose` 是 `monocular-inertial` 节点发布的 topic，`mono` 节点只订阅图像并在退出时保存 `KeyFrameTrajectory.txt`。
+随后按步骤 6 播放 bag，并按步骤 8 结束节点和检查轨迹。
 
-### 无显示环境启动失败
+## 步骤 10：需要自定义 mask 时这样启动
 
-`mono` 可执行当前固定启用 Pangolin viewer。远程或无显示环境使用：
+自定义 mask 必须是与输入图像逐像素对齐的 `1280 × 1280` 灰度图。
+假设文件路径为 `$HOME/config/my_gripper_mask.png`，执行：
 
 ```bash
-xvfb-run -a ros2 run orbslam3 mono ...
+source /opt/ros/jazzy/setup.bash
+source $HOME/work/slam/install/local_setup.bash
+
+export CUSTOM_MASK=$HOME/config/my_gripper_mask.png
+export RESULT_DIR=$HOME/results/orbslam3_mono_0722_slam_custom_mask
+
+test -s "$CUSTOM_MASK"
+file "$CUSTOM_MASK"
+
+mkdir -p "$RESULT_DIR"
+cd "$RESULT_DIR"
+
+ros2 launch orbslam3 xv_rgb_fisheye_mono.launch.py \
+  feature_mask_path:="$CUSTOM_MASK" \
+  use_viewer:=false \
+  use_rviz:=true \
+  2>&1 | tee mono_0722_slam_custom_mask.log
 ```
 
-如果需要从命令行关闭 viewer，需要修改 `src/monocular/mono.cpp` 增加 viewer 开关参数；本文流程不修改代码。
+日志中的 `Loaded monocular feature mask` 应显示自定义路径、`1280x1280`
+尺寸和排除比例。随后按步骤 6 播放 bag，并按步骤 8 保存结果。
 
-### 轨迹尺度看起来不对
+## 步骤 11：需要 Pangolin 窗口时这样启动
 
-纯单目没有 IMU、双目基线或深度约束，轨迹只有相似变换意义下的尺度。该输出可用于观察跟踪稳定性和相对运动趋势，不能直接当作米制位姿使用。
+本地桌面环境可以把步骤 5 命令中的 viewer 参数从 `false` 改为
+`true`。完整命令如下：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source $HOME/work/slam/install/local_setup.bash
+
+export RESULT_DIR=$HOME/results/orbslam3_mono_0722_slam_viewer
+
+mkdir -p "$RESULT_DIR"
+cd "$RESULT_DIR"
+
+ros2 launch orbslam3 xv_rgb_fisheye_mono.launch.py \
+  use_viewer:=true \
+  use_rviz:=false \
+  2>&1 | tee mono_0722_slam_viewer.log
+```
+
+SSH 或无显示环境继续使用步骤 5 的 `false`，无需 `xvfb-run`。
+
+## 本数据集已有实测记录
+
+2026-07-22 使用默认配置以 1.0 倍速完整回放
+`$HOME/datasets/ros2bag/0722_slam`，实测结果如下：
+
+- 回放原始鱼眼图像：`2574` 帧；
+- 成功初始化地图，初始地图点：`75`；
+- 有效 ROS 位姿：`1869` 个，frame_id 全部为 `camera_start`；
+- `KeyFrameTrajectory.txt`：`81` 条，首条关键帧为单位位姿；
+- `New Map created`：`1` 次；
+- `Reset map`、`Relocalization` 和 `Fail to track local map`：均为 `0` 次；
+- RViz2 在虚拟 X Server 中成功启动 OpenGL，未出现 Fixed Frame 或 TF 显示错误。
+
+本次结果文件保存在 `$HOME/results/orbslam3_mono_0722_slam`。

@@ -65,34 +65,6 @@ cv::Mat LoadFeatureMask(const std::string& path)
 }
 
 /**
- * @brief 使用二值掩膜清除输入图像中的排除区域。
- * @param image 待处理的单通道或多通道输入图像。
- * @param mask 白色允许、黑色排除的 CV_8UC1 二值掩膜；空矩阵表示禁用。
- * @return 应用掩膜后的独立图像；掩膜禁用时返回输入图像的浅拷贝。
- * @throws std::invalid_argument 掩膜类型或尺寸无效时抛出。
- */
-cv::Mat ApplyFeatureMask(const cv::Mat& image, const cv::Mat& mask)
-{
-    if (mask.empty())
-    {
-        return image;
-    }
-    if (mask.type() != CV_8UC1)
-    {
-        throw std::invalid_argument("特征掩膜必须是 CV_8UC1 单通道 8 位图像");
-    }
-    if (mask.size() != image.size())
-    {
-        throw std::invalid_argument("特征掩膜尺寸必须与输入图像一致");
-    }
-
-    /** @brief 排除区域清零后的跟踪图像。 */
-    cv::Mat masked_image = cv::Mat::zeros(image.size(), image.type());
-    image.copyTo(masked_image, mask);
-    return masked_image;
-}
-
-/**
  * @brief 检查掩膜尺寸是否与算法缩放前的输入图像一致。
  * @param mask 待检查掩膜；空矩阵表示禁用并视为合法。
  * @param image_size 输入图像尺寸。

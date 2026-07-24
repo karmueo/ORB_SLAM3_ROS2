@@ -46,7 +46,7 @@ Sophus::SE3f ComputeCameraPoseInWorld(const Sophus::SE3f& Tcw);
 /**
  * @brief 将 ORB 光学坐标表示的相机位姿换基为 ROS 机体坐标表示。
  * @param Twc ORB 世界系下的当前相机光学位姿。
- * @return ROS map 系下的 camera_link 位姿，其中 x 前、y 左、z 上。
+ * @return ROS camera_start 系下的 camera_link 位姿，其中 x 前、y 左、z 上。
  */
 Sophus::SE3f ConvertOrbCameraPoseToRos(const Sophus::SE3f& Twc);
 

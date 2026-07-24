@@ -108,6 +108,13 @@ ros2 launch orbslam3 xv_rgb_fisheye_undistorted_mono.launch.py
 ros2 launch orbslam3 xv_rgb_fisheye_undistorted_mono.launch.py use_viewer:=false
 ```
 
+只运行 SLAM 跟踪且不发布 ROS 2 位姿、轨迹和 TF：
+
+```bash
+ros2 launch orbslam3 xv_rgb_fisheye_undistorted_mono.launch.py \
+  publish_ros_pose:=false
+```
+
 设备序列号变化时覆盖图像 topic：
 
 ```bash
@@ -153,18 +160,18 @@ ORB-SLAM3 跟踪状态栏，因此桌面窗口的总高度会略大于上述视�
 launch 默认加载以下静态二值掩膜：
 
 ```text
-config/masks/XV_RGB_Fisheye_gripper_mask.png
+config/masks/mask.png
 ```
 
-该模板尺寸为 `1280 × 1280`，与 XV SDK 发布的校正图像逐像素对齐。像素含义如下：
+默认 mask 尺寸为 `1280 × 1280`，与 XV SDK 发布的校正图像逐像素对齐，当前黑色区域
+约占 31.44%。像素含义如下：
 
 - 白色 `255`：允许提取 ORB 特征；
 - 黑色 `0`：排除 ORB 特征。
 
-仓库中的默认模板为全白图，因此初始行为与未启用掩膜一致。制作实际夹爪 mask 时，
-应采集夹爪最小开度、最大开度和常用姿态的校正图像，把所有姿态下夹爪轮廓的并集涂黑，
-其余区域保持白色。建议把黑区适当扩展到夹爪轮廓外侧，为 ORB 特征方向和描述子采样
-预留安全边界。
+默认文件已经包含当前夹爪排除区域。重新制作 mask 时，应采集夹爪最小开度、最大开度和
+常用姿态的校正图像，把所有姿态下夹爪轮廓的并集涂黑，其余区域保持白色。建议把黑区
+适当扩展到夹爪轮廓外侧，为 ORB 特征方向和描述子采样预留安全边界。
 
 使用自定义 mask：
 
@@ -180,10 +187,13 @@ ros2 launch orbslam3 xv_rgb_fisheye_undistorted_mono.launch.py \
   feature_mask_path:=""
 ```
 
-节点在送入跟踪前创建图像副本，并把 mask 黑区对应的像素清零；ROS 输入消息和 RViz
-显示的原始图像不会被修改。处理后的图像通过 ORB-SLAM3 官方
-`TrackMonocular(image, timestamp)` 接口跟踪，因此无需额外的 ORB-SLAM3 API 补丁。
-ORB-SLAM3 随后按配置把图像从 `1280 × 1280` 缩放到 `960 × 960`，
+节点通过 `TrackMonocular(image, mask, timestamp)` 将原始图像和 mask 分开传入
+ORB-SLAM3。算法先在原始金字塔图像中执行 FAST 检测，再按各层最近邻缩放后的 mask
+过滤候选点；关键点中心位于黑区时不会进入八叉树特征分配和描述子计算，白区边界
+不会被额外腐蚀。
+
+输入图像像素始终保持原值，因此 mask 黑白交界不会成为人工图像边缘。ORB-SLAM3 按配置
+把图像和 mask 从 `1280 × 1280` 同步缩放到 `960 × 960`，
 `Camera.newWidth/newHeight`、内参和算法处理分辨率保持不变。
 
 启动日志会打印 mask 路径、尺寸和排除比例。以下情况会停止处理并给出错误：
@@ -204,14 +214,49 @@ ros2 run orbslam3 mono \
   "$PKG/config/monocular/XV_RGB_Fisheye_undistorted.yaml" \
   false \
   --ros-args \
-  -p feature_mask_path:="$PKG/config/masks/XV_RGB_Fisheye_gripper_mask.png" \
+  -p feature_mask_path:="$PKG/config/masks/mask.png" \
+  -p publish_ros_pose:=true \
   -p max_path_length:=10000 \
   -r camera:=/xv_sdk/SN250801DR48FB26001253/rgb_fisheye_undistorted/image
 ```
 
 当前数据流和配置中的 `Camera.fps` 均为 60 Hz。纯单目链路保留连续输入帧，不在 ROS wrapper 中主动限帧，以维持快速运动时的帧间重叠。
 
+### 3.3 回放 0721 数据集
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source $HOME/work/slam/ORB_SLAM3_ROS2/install/local_setup.bash
+
+ros2 launch orbslam3 xv_rgb_fisheye_undistorted_mono.launch.py \
+  use_viewer:=false \
+  use_rviz:=false
+```
+
+另一个终端仅回放去畸变单目图像：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+ros2 bag play $HOME/datasets/ros2bag/0721 \
+  --topics /xv_sdk/SN250801DR48FB26001253/rgb_fisheye_undistorted/image
+```
+
+该 bag 时长约 38.64 秒，包含 2320 帧 1280 × 1280 去畸变图像。纯单目节点不会订阅
+bag 中的 IMU。默认 `mask.png` 与该图像尺寸逐像素对齐；启动日志应显示 mask 排除比例
+约为 31.44%。
+
+2026-07-22 使用默认 mask、1.0 倍速回放全部 2320 帧的实测结果：
+
+- 成功初始化地图，初始地图点为 207；
+- 监听到约 1739 个有效位姿，末次统计平均发布频率约为 52.17 Hz；
+- 节点干净退出并生成 55 条关键帧轨迹；
+- 运行期间未观察到地图重置或重定位日志。
+
 ## 4. 检查定位输出
+
+`publish_ros_pose` 默认为 `true`。设置为 `false` 时节点不会创建
+`/orbslam3/camera_pose`、`/orbslam3/camera_path`、动态 TF 或相机静态 TF，
+但仍会持续跟踪并在正常退出时保存 `KeyFrameTrajectory.txt`。
 
 检查实时相机位姿和轨迹：
 
@@ -219,17 +264,22 @@ ros2 run orbslam3 mono \
 ros2 topic hz /orbslam3/camera_pose
 ros2 topic echo /orbslam3/camera_pose --once
 ros2 topic echo /orbslam3/camera_path --once --no-arr
-ros2 run tf2_ros tf2_echo map camera_link
+ros2 run tf2_ros tf2_echo camera_start camera_link
 ros2 run tf2_ros tf2_echo camera_link camera_optical_frame
 ```
 
 输出含义：
 
-- `/orbslam3/camera_pose`：当前 `camera_link` 在 `map` 中的位姿，采用 x 前、y 左、z 上约定；
+- `/orbslam3/camera_pose`：当前 `camera_link` 在 `camera_start` 中的位姿，采用 x 前、y 左、z 上约定；
 - `/orbslam3/camera_path`：最多保留 `max_path_length` 个有效 `camera_link` 位姿；
-- `map -> camera_link`：与当前位姿同时间戳、同变换的动态 TF；
+- `camera_start -> camera_link`：与当前位姿同时间戳、同变换的动态 TF；
 - `camera_link -> camera_optical_frame`：零平移的静态 TF，将机体系转换为 x 右、y 下、z 前的光学系；
 - `KeyFrameTrajectory.txt`：节点正常退出时保存的 TUM 格式关键帧轨迹。
+
+`camera_start` 与 ORB-SLAM3 成功建图时选定的初始化首帧相机坐标系重合。
+该帧可能晚于输入流的第一张图像，例如特征不足或两视图初始化重试时会顺延。
+ROS Path 使用 x 前、y 左、z 上的机体系约定；`KeyFrameTrajectory.txt` 保持 ORB-SLAM3
+原生 TUM 光学坐标约定，原点仍对应同一初始化相机。
 
 位姿、轨迹和 TF 只在 ORB-SLAM3 状态为 `OK` 或 `OK_KLT` 时发布。进入 `LOST`
 后会暂停发布；恢复有效跟踪时清空旧 Path，再从当前位姿重新累计。默认
@@ -246,17 +296,17 @@ ros2 launch orbslam3 xv_rgb_fisheye_undistorted_mono.launch.py \
   max_path_length:=10000
 ```
 
-RViz2 的 Fixed Frame 默认为 `map`，并自动显示 Grid、TF、Camera Pose 和 Camera Path。
+RViz2 的 Fixed Frame 默认为 `camera_start`，并自动显示 Grid、TF、Camera Pose 和 Camera Path。
 Camera Image 默认订阅与 SLAM 相同的 `camera_topic`，launch 会自动完成话题重映射；覆盖
 `camera_topic:=/其他图像话题` 时，SLAM 和 RViz 视频会一起切换。
-`map` 和 `camera_link` 采用 ROS 机体坐标约定：x 向前、y 向左、z 向上。RViz
-坐标轴颜色固定为红色 x、绿色 y、蓝色 z，Grid 位于 `map` 的 XY 平面。
+`camera_start` 和 `camera_link` 采用 ROS 机体坐标约定：x 向前、y 向左、z 向上。RViz
+坐标轴颜色固定为红色 x、绿色 y、蓝色 z，Grid 位于 `camera_start` 的 XY 平面。
 `camera_optical_frame` 作为 `camera_link` 的静态子坐标系保留，采用 x 向右、y 向下、
 z 向前的图像坐标约定。也可以通过
 `rviz_config_path:=/绝对路径/custom.rviz` 加载自定义显示配置。
 
-`map` 的方向以 ORB 地图首个参考相机为基准，因此初始相机前方对应 `map +X`，
-初始相机上方对应 `map +Z`。纯单目没有重力观测，`map +Z` 不保证与真实重力反方向严格对齐。
+`camera_start` 的方向以 ORB 地图首个参考相机为基准，因此初始相机前方对应 `camera_start +X`，
+初始相机上方对应 `camera_start +Z`。纯单目没有重力观测，`camera_start +Z` 不保证与真实重力反方向严格对齐。
 
 纯单目系统缺少深度、双目基线和 IMU 尺度约束。上述位置和路径只有任意尺度，可用于相对运动、回环和跟踪稳定性观察，不能直接当作米制定位结果。
 
@@ -269,7 +319,7 @@ z 向前的图像坐标约定。也可以通过
 - ORB-SLAM3 日志出现地图创建，且没有持续打印 `Reset map`；
 - `/orbslam3/camera_pose` 持续发布；
 - `/orbslam3/camera_path` 中的 pose 数量随运动增长且不超过配置上限；
-- `tf2_echo map camera_link` 持续输出同时间戳动态变换；
+- `tf2_echo camera_start camera_link` 持续输出同时间戳动态变换；
 - `tf2_echo camera_link camera_optical_frame` 输出稳定的零平移固定旋转；
 - 启用 `use_rviz:=true` 后能看到相机坐标系和轨迹；
 - 退出节点后生成非空 `KeyFrameTrajectory.txt`。
@@ -289,5 +339,7 @@ head KeyFrameTrajectory.txt
 - 本链路不订阅 IMU，也不使用任何 `IMU.*` 参数；
 - launch 默认只启动 ORB-SLAM3；`use_rviz:=true` 时额外启动 RViz2，XV SDK 去畸变
   发布端始终需要提前启动；
+- `publish_ros_pose:=false` 只关闭 ROS 2 Pose、Path 和 TF，不影响 Pangolin、跟踪和
+  退出时保存关键帧轨迹；
 - `camera_path` 默认保留最近 10000 个有效位姿；设置 `max_path_length:=0` 后消息会随
   运行时间持续增大。

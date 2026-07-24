@@ -12,6 +12,8 @@
 #include "nav_msgs/msg/path.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/imu.hpp"
+#include "tf2_ros/static_transform_broadcaster.h"
+#include "tf2_ros/transform_broadcaster.h"
 
 #include <cv_bridge/cv_bridge.hpp>
 
@@ -26,8 +28,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -100,6 +104,12 @@ private:
      */
     bool PublishBodyPose(const Sophus::SE3f& Tcw, const builtin_interfaces::msg::Time& stamp);
 
+    /**
+     * @brief 使用首帧图像 frame_id 发布机体到相机光学系的静态 TF。
+     * @param msg 首帧输入图像消息。
+     */
+    void PublishStaticBodyCameraTransform(const ImageMsg::SharedPtr& msg);
+
     /** @brief IMU 订阅器。 */
     rclcpp::Subscription<ImuMsg>::SharedPtr subImu_;
     /** @brief 单目图像订阅器。 */
@@ -108,9 +118,17 @@ private:
     rclcpp::Publisher<PoseStampedMsg>::SharedPtr posePub_;
     /** @brief 机体系累计轨迹发布器。 */
     rclcpp::Publisher<PathMsg>::SharedPtr pathPub_;
+    /** @brief map 到 body_link 的动态 TF 广播器。 */
+    std::unique_ptr<tf2_ros::TransformBroadcaster> dynamicTfBroadcaster_;
+    /** @brief body_link 到相机光学系的静态 TF 广播器。 */
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> staticTfBroadcaster_;
 
     /** @brief ORB_SLAM3 系统实例指针，节点不拥有其生命周期。 */
     ORB_SLAM3::System* SLAM_;
+    /** @brief 白色允许、黑色排除的静态特征掩膜；空矩阵表示禁用。 */
+    cv::Mat featureMask_;
+    /** @brief 是否已经使用首帧输入图像校验特征掩膜尺寸。 */
+    bool featureMaskSizeValidated_;
     /** @brief 图像和 IMU 同步线程。 */
     std::thread syncThread_;
     /** @brief 同步线程停止标志，用于析构时安全退出。 */
@@ -129,6 +147,10 @@ private:
     std::size_t maxImageQueueSize_;
     /** @brief ROS wrapper 主动送入 SLAM 的目标图像帧率，单位 Hz；小于等于 0 时关闭限帧。 */
     double targetImageFps_;
+    /** @brief ROS Path 最多保留的有效机体位姿数量；0 表示无限累计。 */
+    std::size_t maxPathLength_;
+    /** @brief 节点退出时是否保存 ORB-SLAM3 关键帧轨迹文件。 */
+    bool saveKeyframeTrajectory_;
     /** @brief 图像平均帧率限制状态，用于避免固定间隔限帧在略高输入帧率下退化。 */
     MonocularImageRateLimitState imageRateLimitState_;
     /** @brief 最近一次处理的图像时间戳，用于丢弃回跳帧。 */
@@ -167,8 +189,16 @@ private:
     std::atomic<std::uint64_t> imuWaitCount_;
     /** @brief 已成功发布的机体系位姿数量。 */
     std::atomic<std::uint64_t> posePublishCount_;
-    /** @brief 机体系到相机系外参，对应 ORB_SLAM3 配置中的 IMU.T_b_c1 或 Tbc。 */
+    /** @brief BA1 首次被观察为完成的图像时间戳，负数表示尚未进入稳定等待。 */
+    double ba1InitializedSinceSec_;
+    /** @brief 相机系到机体系外参，对应 ORB_SLAM3 配置中的 IMU.T_b_c1 或 Tbc。 */
     Sophus::SE3f Tbc_;
+    /** @brief LOST 后恢复跟踪时使用的轨迹重置状态。 */
+    BodyPathResetState pathResetState_;
+    /** @brief 是否已经根据首帧图像发布机体到相机的静态 TF。 */
+    bool staticCameraTransformPublished_;
+    /** @brief 首帧图像声明的相机光学坐标系名称。 */
+    std::string cameraFrameId_;
     /** @brief 累计发布的机体系轨迹。 */
     PathMsg pathMsg_;
 };

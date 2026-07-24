@@ -29,7 +29,7 @@ geometry_msgs::msg::PoseStamped CreateTestPose(
 {
   /** @brief 待返回的测试位姿消息。 */
   geometry_msgs::msg::PoseStamped pose_message;
-  pose_message.header.frame_id = "map";
+  pose_message.header.frame_id = "camera_start";
   pose_message.header.stamp.sec = stamp_seconds;
   pose_message.pose.position.x = x_position;
   pose_message.pose.orientation.w = 1.0;
@@ -78,17 +78,17 @@ TEST(MonocularPose, ConvertsIdentityPoseToRosCameraLink)
 {
   /** @brief ORB 世界系下的单位相机光学位姿。 */
   const Sophus::SE3f Twc;
-  /** @brief ROS map 系下转换后的 camera_link 位姿。 */
-  const Sophus::SE3f map_from_camera_link =
+  /** @brief ROS camera_start 系下转换后的 camera_link 位姿。 */
+  const Sophus::SE3f camera_start_from_camera_link =
       ConvertOrbCameraPoseToRos(Twc);
 
   EXPECT_TRUE(
-      map_from_camera_link.matrix().isApprox(
+      camera_start_from_camera_link.matrix().isApprox(
           Sophus::SE3f().matrix(), kTolerance));
 }
 
 /** @brief 验证光学系平移轴映射为 ROS 的 x 前、y 左、z 上。 */
-TEST(MonocularPose, MapsOpticalTranslationAxesToRosMap)
+TEST(MonocularPose, MapsOpticalTranslationAxesToRosCameraStart)
 {
   /** @brief 光学系向前移动一个单位后的相机位姿。 */
   const Sophus::SE3f optical_forward_pose(
@@ -99,13 +99,13 @@ TEST(MonocularPose, MapsOpticalTranslationAxesToRosMap)
   /** @brief 光学系向下移动一个单位后的相机位姿。 */
   const Sophus::SE3f optical_down_pose(
       Eigen::Matrix3f::Identity(), Eigen::Vector3f::UnitY());
-  /** @brief ROS map 系下的向前平移。 */
+  /** @brief ROS camera_start 系下的向前平移。 */
   const Sophus::SE3f ros_forward_pose =
       ConvertOrbCameraPoseToRos(optical_forward_pose);
-  /** @brief ROS map 系下的向右平移。 */
+  /** @brief ROS camera_start 系下的向右平移。 */
   const Sophus::SE3f ros_right_pose =
       ConvertOrbCameraPoseToRos(optical_right_pose);
-  /** @brief ROS map 系下的向下平移。 */
+  /** @brief ROS camera_start 系下的向下平移。 */
   const Sophus::SE3f ros_down_pose =
       ConvertOrbCameraPoseToRos(optical_down_pose);
 
@@ -159,19 +159,19 @@ TEST(MonocularPose, ComposesCameraLinkAndOpticalTransforms)
   const Sophus::SE3f Twc(
       Eigen::AngleAxisf(0.4F, Eigen::Vector3f::UnitX()).toRotationMatrix(),
       Eigen::Vector3f(1.0F, 2.0F, 3.0F));
-  /** @brief ROS map 到 camera_link 的动态变换。 */
-  const Sophus::SE3f map_from_camera_link =
+  /** @brief ROS camera_start 到 camera_link 的动态变换。 */
+  const Sophus::SE3f camera_start_from_camera_link =
       ConvertOrbCameraPoseToRos(Twc);
   /** @brief 动态 TF 与静态 TF 组合得到的光学位姿。 */
-  const Sophus::SE3f composed_map_from_optical =
-      map_from_camera_link * link_from_optical;
-  /** @brief 直接将 ORB 世界基准旋转到 ROS map 后的期望光学位姿。 */
-  const Sophus::SE3f expected_map_from_optical =
+  const Sophus::SE3f composed_camera_start_from_optical =
+      camera_start_from_camera_link * link_from_optical;
+  /** @brief 直接将 ORB 世界基准旋转到 ROS camera_start 后的期望光学位姿。 */
+  const Sophus::SE3f expected_camera_start_from_optical =
       link_from_optical * Twc;
 
   EXPECT_TRUE(
-      composed_map_from_optical.matrix().isApprox(
-          expected_map_from_optical.matrix(), kTolerance));
+      composed_camera_start_from_optical.matrix().isApprox(
+          expected_camera_start_from_optical.matrix(), kTolerance));
 }
 
 /** @brief 验证 camera_link 的 PoseStamped 和动态 TF 保持一致。 */
@@ -187,7 +187,7 @@ TEST(MonocularPose, CreatesConsistentPoseAndTransformMessages)
   stamp.nanosec = 123456789U;
   /** @brief 转换得到的 ROS 相机位姿消息。 */
   const geometry_msgs::msg::PoseStamped pose_message =
-      CreateCameraPoseMessage(Twc, stamp, "map");
+      CreateCameraPoseMessage(Twc, stamp, "camera_start");
   /** @brief 根据位姿消息生成的动态 TF。 */
   const geometry_msgs::msg::TransformStamped transform_message =
       CreateCameraTransformMessage(
@@ -199,7 +199,7 @@ TEST(MonocularPose, CreatesConsistentPoseAndTransformMessages)
       pose_message.pose.orientation.z * pose_message.pose.orientation.z +
       pose_message.pose.orientation.w * pose_message.pose.orientation.w;
 
-  EXPECT_EQ(pose_message.header.frame_id, "map");
+  EXPECT_EQ(pose_message.header.frame_id, "camera_start");
   EXPECT_EQ(pose_message.header.stamp, stamp);
   EXPECT_NEAR(quaternion_norm_squared, 1.0, kTolerance);
   EXPECT_EQ(transform_message.header, pose_message.header);
@@ -233,6 +233,7 @@ TEST(MonocularPose, BoundsPathAndDropsOldestPoses)
   }
 
   ASSERT_EQ(path_message.poses.size(), 3U);
+  EXPECT_EQ(path_message.header.frame_id, "camera_start");
   EXPECT_DOUBLE_EQ(path_message.poses[0].pose.position.x, 2.0);
   EXPECT_DOUBLE_EQ(path_message.poses[1].pose.position.x, 3.0);
   EXPECT_DOUBLE_EQ(path_message.poses[2].pose.position.x, 4.0);

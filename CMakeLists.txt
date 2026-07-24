@@ -67,13 +67,14 @@ add_executable(mono
 ament_target_dependencies(mono rclcpp sensor_msgs geometry_msgs nav_msgs cv_bridge tf2_ros ORB_SLAM3 Pangolin OpenCV)
 
 add_executable(monocular-inertial
+  src/monocular/monocular-feature-mask.cpp
   src/monocular-inertial/monocular-inertial.cpp
   src/monocular-inertial/monocular-inertial-node.cpp
   src/monocular-inertial/monocular-inertial-pose.cpp
   src/monocular-inertial/monocular-inertial-sync.cpp
 )
-target_include_directories(monocular-inertial PRIVATE src/monocular-inertial)
-ament_target_dependencies(monocular-inertial rclcpp sensor_msgs geometry_msgs nav_msgs cv_bridge ORB_SLAM3 Pangolin OpenCV)
+target_include_directories(monocular-inertial PRIVATE src/monocular src/monocular-inertial)
+ament_target_dependencies(monocular-inertial rclcpp sensor_msgs geometry_msgs nav_msgs cv_bridge tf2_ros ORB_SLAM3 Pangolin OpenCV)
 
 add_executable(rgbd
   src/rgbd/rgbd.cpp
@@ -135,7 +136,7 @@ if(BUILD_TESTING)
   if(TARGET test_monocular_feature_mask)
     target_include_directories(test_monocular_feature_mask PRIVATE src/monocular)
     target_compile_definitions(test_monocular_feature_mask PRIVATE ORBSLAM3_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-    ament_target_dependencies(test_monocular_feature_mask OpenCV)
+    ament_target_dependencies(test_monocular_feature_mask ORB_SLAM3 OpenCV)
   endif()
   ament_add_gtest(test_monocular_pose test/test_monocular_pose.cpp src/monocular/monocular-pose.cpp)
   if(TARGET test_monocular_pose)
@@ -151,7 +152,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_monocular_inertial_pose test/test_monocular_inertial_pose.cpp src/monocular-inertial/monocular-inertial-pose.cpp)
   if(TARGET test_monocular_inertial_pose)
     target_include_directories(test_monocular_inertial_pose PRIVATE src/monocular-inertial)
-    ament_target_dependencies(test_monocular_inertial_pose ORB_SLAM3 OpenCV)
+    ament_target_dependencies(test_monocular_inertial_pose geometry_msgs nav_msgs ORB_SLAM3 OpenCV)
   endif()
   ament_add_gtest(test_monocular_inertial_sync test/test_monocular_inertial_sync.cpp src/monocular-inertial/monocular-inertial-sync.cpp)
   if(TARGET test_monocular_inertial_sync)
