@@ -12,6 +12,17 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# The fixed ORB_SLAM3 core is built with its CMakeLists' -march=native.
+# Eigen/g2o class layouts depend on that target, so wrapper and tests must use
+# the same ISA flags when exchanging ORB_SLAM3 objects and IMU::Point vectors.
+add_compile_options(-march=native)
+
+# Use DT_RPATH (instead of DT_RUNPATH) so locally built Pangolin dependencies
+# remain resolvable transitively without requiring a global runner setup.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.13")
+  add_link_options(-Wl,--disable-new-dtags)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -22,6 +33,8 @@ find_package(message_filters REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Eigen REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(rosbag2_storage REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(Pangolin REQUIRED)
 find_package(ORB_SLAM3 REQUIRED)
@@ -98,8 +111,15 @@ ament_target_dependencies(stereo rclcpp sensor_msgs cv_bridge message_filters OR
 add_executable(stereo-inertial
   src/stereo-inertial/stereo-inertial.cpp
   src/stereo-inertial/stereo-inertial-node.cpp
+  src/stereo-inertial/offline-bag-reader.cpp
+  src/stereo-inertial/offline-cli.cpp
+  src/stereo-inertial/offline-output.cpp
+  src/stereo-inertial/offline-runner.cpp
+  src/stereo-inertial/offline-slam-sink.cpp
+  src/stereo-inertial/offline-sync.cpp
 )
-ament_target_dependencies(stereo-inertial rclcpp sensor_msgs cv_bridge ORB_SLAM3 Pangolin OpenCV)
+target_include_directories(stereo-inertial PRIVATE src/stereo-inertial)
+ament_target_dependencies(stereo-inertial rclcpp sensor_msgs cv_bridge rosbag2_cpp rosbag2_storage ORB_SLAM3 Pangolin OpenCV)
 
 install(TARGETS mono monocular-inertial rgbd stereo stereo-inertial DESTINATION lib/${PROJECT_NAME})
 install(TARGETS rgbd-raw-data-converter DESTINATION lib/${PROJECT_NAME})
@@ -111,6 +131,14 @@ install(PROGRAMS scripts/evaluate_trajectory.py
 install(PROGRAMS scripts/validate_xv_0709_bag.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME validate_xv_0709_bag
+)
+install(PROGRAMS scripts/prepare_ego_stereo_inertial_config.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME prepare-ego-stereo-inertial-config
+)
+install(PROGRAMS scripts/align_ego_stereo_inertial_time.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME align-ego-stereo-inertial-time
 )
 install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
@@ -132,11 +160,21 @@ if(BUILD_TESTING)
   ament_add_pytest_test(validate_xv_0709_bag test/test_validate_xv_0709_bag.py)
   ament_add_pytest_test(xv_rgb_fisheye_config test/test_xv_rgb_fisheye_config.py)
   ament_add_pytest_test(xv_rgb_fisheye_monocular_config test/test_xv_rgb_fisheye_monocular_config.py)
+  add_executable(prepare_ego_config_settings_probe test/prepare_ego_config_settings_probe.cpp)
+  ament_target_dependencies(prepare_ego_config_settings_probe ORB_SLAM3 Pangolin OpenCV)
+  ament_add_pytest_test(prepare_ego_stereo_inertial_config test/test_prepare_ego_stereo_inertial_config.py
+    ENV "EGO_CONFIG_SETTINGS_PROBE=$<TARGET_FILE:prepare_ego_config_settings_probe>")
+  ament_add_pytest_test(prepare_offline_core_patch_stack test/test_prepare_offline_core_patch_stack.py)
+  ament_add_pytest_test(align_ego_stereo_inertial_time test/test_align_ego_stereo_inertial_time.py)
   ament_add_gtest(test_monocular_feature_mask test/test_monocular_feature_mask.cpp src/monocular/monocular-feature-mask.cpp)
   if(TARGET test_monocular_feature_mask)
     target_include_directories(test_monocular_feature_mask PRIVATE src/monocular)
     target_compile_definitions(test_monocular_feature_mask PRIVATE ORBSLAM3_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-    ament_target_dependencies(test_monocular_feature_mask ORB_SLAM3 OpenCV)
+    ament_target_dependencies(test_monocular_feature_mask ORB_SLAM3 Pangolin OpenCV)
+  endif()
+  ament_add_gtest(test_core_fisheye_settings test/test_core_fisheye_settings.cpp)
+  if(TARGET test_core_fisheye_settings)
+    ament_target_dependencies(test_core_fisheye_settings ORB_SLAM3 Pangolin OpenCV)
   endif()
   ament_add_gtest(test_monocular_pose test/test_monocular_pose.cpp src/monocular/monocular-pose.cpp)
   if(TARGET test_monocular_pose)
@@ -158,6 +196,57 @@ if(BUILD_TESTING)
   if(TARGET test_monocular_inertial_sync)
     target_include_directories(test_monocular_inertial_sync PRIVATE src/monocular-inertial)
     ament_target_dependencies(test_monocular_inertial_sync rclcpp sensor_msgs ORB_SLAM3 OpenCV)
+  endif()
+
+  ament_add_gtest(test_offline_cli test/test_offline_cli.cpp src/stereo-inertial/offline-cli.cpp)
+  if(TARGET test_offline_cli)
+    target_include_directories(test_offline_cli PRIVATE src/stereo-inertial)
+    ament_target_dependencies(test_offline_cli OpenCV)
+  endif()
+
+  ament_add_gtest(test_offline_sync test/test_offline_sync.cpp src/stereo-inertial/offline-sync.cpp)
+  if(TARGET test_offline_sync)
+    target_include_directories(test_offline_sync PRIVATE src/stereo-inertial)
+    ament_target_dependencies(test_offline_sync ORB_SLAM3 OpenCV)
+  endif()
+
+  ament_add_gtest(test_offline_output test/test_offline_output.cpp
+    src/stereo-inertial/offline-output.cpp
+    src/stereo-inertial/offline-sync.cpp)
+  if(TARGET test_offline_output)
+    target_include_directories(test_offline_output PRIVATE src/stereo-inertial)
+    ament_target_dependencies(test_offline_output ORB_SLAM3 Pangolin OpenCV)
+  endif()
+
+  ament_add_gtest(test_offline_bag_reader test/test_offline_bag_reader.cpp
+    src/stereo-inertial/offline-bag-reader.cpp
+    src/stereo-inertial/offline-sync.cpp)
+  if(TARGET test_offline_bag_reader)
+    target_include_directories(test_offline_bag_reader PRIVATE src/stereo-inertial)
+    ament_target_dependencies(test_offline_bag_reader rclcpp sensor_msgs rosbag2_cpp rosbag2_storage OpenCV)
+  endif()
+
+  ament_add_gtest(test_offline_runner test/test_offline_runner.cpp
+    src/stereo-inertial/offline-runner.cpp
+    src/stereo-inertial/offline-output.cpp
+    src/stereo-inertial/offline-sync.cpp
+    src/stereo-inertial/offline-slam-sink.cpp
+    src/stereo-inertial/offline-bag-reader.cpp)
+  if(TARGET test_offline_runner)
+    target_include_directories(test_offline_runner PRIVATE src/stereo-inertial)
+    ament_target_dependencies(test_offline_runner rclcpp sensor_msgs rosbag2_cpp rosbag2_storage ORB_SLAM3 Pangolin OpenCV)
+  endif()
+
+  ament_add_gtest(test_offline_core_lifecycle test/test_offline_core_lifecycle.cpp)
+  if(TARGET test_offline_core_lifecycle)
+    target_compile_definitions(test_offline_core_lifecycle PRIVATE
+      OFFLINE_TEST_VOCABULARY="${CMAKE_CURRENT_BINARY_DIR}/vocabulary/ORBvoc.txt")
+    # Test-only access to existing core internals: no production debug API is
+    # added just so gtest can seed a LoopClosing queue or Tracking record.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      target_compile_options(test_offline_core_lifecycle PRIVATE -fno-access-control)
+    endif()
+    ament_target_dependencies(test_offline_core_lifecycle ORB_SLAM3 Pangolin OpenCV)
   endif()
 endif()
 

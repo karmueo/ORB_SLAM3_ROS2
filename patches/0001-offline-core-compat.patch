@@ -1,0 +1,515 @@
+diff --git a/include/Frame.h b/include/Frame.h
+index 572073f..6858d9d 100644
+--- a/include/Frame.h
++++ b/include/Frame.h
+@@ -65,13 +65,14 @@ public:
+     Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
+ 
+     // Constructor for Monocular cameras.
+-    Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
++    Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib(), const cv::Mat &mask = cv::Mat());
+ 
+     // Destructor
+     // ~Frame();
+ 
+     // Extract ORB on the image. 0 for left image and 1 for right image.
+     void ExtractORB(int flag, const cv::Mat &im, const int x0, const int x1);
++    void ExtractORB(int flag, const cv::Mat &im, const int x0, const int x1, const cv::Mat &mask);
+ 
+     // Compute Bag of Words representation.
+     void ComputeBoW();
+diff --git a/include/LocalMapping.h b/include/LocalMapping.h
+index dd04a3d..a1fc951 100644
+--- a/include/LocalMapping.h
++++ b/include/LocalMapping.h
+@@ -47,6 +47,7 @@ public:
+     void SetLoopCloser(LoopClosing* pLoopCloser);
+ 
+     void SetTracker(Tracking* pTracker);
++    void SetDeferLowMotionReset(bool defer);
+ 
+     // Main function
+     void Run();
+@@ -104,6 +105,7 @@ public:
+     bool mbNotBA1;
+     bool mbNotBA2;
+     bool mbBadImu;
++    bool mbDeferLowMotionReset;
+ 
+     bool mbWriteStats;
+ 
+diff --git a/include/ORBextractor.h b/include/ORBextractor.h
+index bb7aace..8ddf713 100644
+--- a/include/ORBextractor.h
++++ b/include/ORBextractor.h
+@@ -53,7 +53,7 @@ public:
+ 
+     // Compute the ORB features and descriptors on an image.
+     // ORB are dispersed on the image using an octree.
+-    // Mask is ignored in the current implementation.
++    // Non-zero mask pixels permit features; an empty mask is equivalent to all-white.
+     int operator()( cv::InputArray _image, cv::InputArray _mask,
+                     std::vector<cv::KeyPoint>& _keypoints,
+                     cv::OutputArray _descriptors, std::vector<int> &vLappingArea);
+@@ -85,7 +85,7 @@ public:
+ protected:
+ 
+     void ComputePyramid(cv::Mat image);
+-    void ComputeKeyPointsOctTree(std::vector<std::vector<cv::KeyPoint> >& allKeypoints);    
++    void ComputeKeyPointsOctTree(std::vector<std::vector<cv::KeyPoint> >& allKeypoints, const cv::Mat &mask = cv::Mat());
+     std::vector<cv::KeyPoint> DistributeOctTree(const std::vector<cv::KeyPoint>& vToDistributeKeys, const int &minX,
+                                            const int &maxX, const int &minY, const int &maxY, const int &nFeatures, const int &level);
+ 
+diff --git a/include/Settings.h b/include/Settings.h
+index beab7de..ad42faa 100644
+--- a/include/Settings.h
++++ b/include/Settings.h
+@@ -91,6 +91,8 @@ namespace ORB_SLAM3 {
+         float imuFrequency() {return imuFrequency_;}
+         Sophus::SE3f Tbc() {return Tbc_;}
+         bool insertKFsWhenLost() {return insertKFsWhenLost_;}
++        bool deferLowMotionReset() {return deferLowMotionReset_;}
++        bool deferPreBA2TrackingReset() {return deferPreBA2TrackingReset_;}
+ 
+         float depthMapFactor() {return depthMapFactor_;}
+ 
+@@ -192,6 +194,8 @@ namespace ORB_SLAM3 {
+         float imuFrequency_;
+         Sophus::SE3f Tbc_;
+         bool insertKFsWhenLost_;
++        bool deferLowMotionReset_;
++        bool deferPreBA2TrackingReset_;
+ 
+         /*
+          * RGBD stuff
+diff --git a/include/System.h b/include/System.h
+index 872c86e..06f5e9f 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -119,6 +119,9 @@ public:
+     // Input images: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
+     // Returns the camera pose (empty if tracking fails).
+     Sophus::SE3f TrackMonocular(const cv::Mat &im, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
++    // Monocular overload with an optional feature mask. The mask must use the
++    // original image resolution; non-zero pixels permit feature extraction.
++    Sophus::SE3f TrackMonocular(const cv::Mat &im, const cv::Mat &mask, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
+ 
+ 
+     // This stops local mapping thread (map building) and performs only camera tracking.
+@@ -177,6 +180,9 @@ public:
+     std::vector<MapPoint*> GetTrackedMapPoints();
+     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+ 
++    // True only when the current active map has completed inertial BA1.
++    bool isInertialBA1Initialized();
++
+     // For debugging
+     double GetTimeFromIMUInit();
+     bool isLost();
+diff --git a/include/Tracking.h b/include/Tracking.h
+index 863c98e..c3ededd 100644
+--- a/include/Tracking.h
++++ b/include/Tracking.h
+@@ -72,6 +72,7 @@ public:
+     Sophus::SE3f GrabImageStereo(const cv::Mat &imRectLeft,const cv::Mat &imRectRight, const double &timestamp, string filename);
+     Sophus::SE3f GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, string filename);
+     Sophus::SE3f GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename);
++    Sophus::SE3f GrabImageMonocular(const cv::Mat &im, const cv::Mat &mask, const double &timestamp, string filename);
+ 
+     void GrabImuData(const IMU::Point &imuMeasurement);
+ 
+@@ -294,6 +295,7 @@ protected:
+     float mImageScale;
+ 
+     float mImuFreq;
++    bool mDeferPreBA2TrackingReset;
+     double mImuPer;
+     bool mInsertKFsLost;
+ 
+diff --git a/src/Frame.cc b/src/Frame.cc
+index a04c312..e1d35c7 100644
+--- a/src/Frame.cc
++++ b/src/Frame.cc
+@@ -119,8 +119,8 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+ #ifdef REGISTER_TIMES
+     std::chrono::steady_clock::time_point time_StartExtORB = std::chrono::steady_clock::now();
+ #endif
+-    thread threadLeft(&Frame::ExtractORB,this,0,imLeft,0,0);
+-    thread threadRight(&Frame::ExtractORB,this,1,imRight,0,0);
++    thread threadLeft(static_cast<void (Frame::*)(int, const cv::Mat &, const int, const int, const cv::Mat &)>(&Frame::ExtractORB),this,0,imLeft,0,0,cv::Mat());
++    thread threadRight(static_cast<void (Frame::*)(int, const cv::Mat &, const int, const int, const cv::Mat &)>(&Frame::ExtractORB),this,1,imRight,0,0,cv::Mat());
+     threadLeft.join();
+     threadRight.join();
+ #ifdef REGISTER_TIMES
+@@ -286,7 +286,7 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
+ }
+ 
+ 
+-Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF, const IMU::Calib &ImuCalib)
++Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF, const IMU::Calib &ImuCalib, const cv::Mat &mask)
+     :mpcpi(NULL),mpORBvocabulary(voc),mpORBextractorLeft(extractor),mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
+      mTimeStamp(timeStamp), mK(static_cast<Pinhole*>(pCamera)->toK()), mK_(static_cast<Pinhole*>(pCamera)->toK_()), mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
+      mImuCalib(ImuCalib), mpImuPreintegrated(NULL),mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mpCamera(pCamera),
+@@ -308,7 +308,7 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
+ #ifdef REGISTER_TIMES
+     std::chrono::steady_clock::time_point time_StartExtORB = std::chrono::steady_clock::now();
+ #endif
+-    ExtractORB(0,imGray,0,1000);
++    ExtractORB(0,imGray,0,1000,mask);
+ #ifdef REGISTER_TIMES
+     std::chrono::steady_clock::time_point time_EndExtORB = std::chrono::steady_clock::now();
+ 
+@@ -416,10 +416,15 @@ void Frame::AssignFeaturesToGrid()
+ }
+ 
+ void Frame::ExtractORB(int flag, const cv::Mat &im, const int x0, const int x1)
++{
++    ExtractORB(flag, im, x0, x1, cv::Mat());
++}
++
++void Frame::ExtractORB(int flag, const cv::Mat &im, const int x0, const int x1, const cv::Mat &mask)
+ {
+     vector<int> vLapping = {x0,x1};
+     if(flag==0)
+-        monoLeft = (*mpORBextractorLeft)(im,cv::Mat(),mvKeys,mDescriptors,vLapping);
++        monoLeft = (*mpORBextractorLeft)(im,mask,mvKeys,mDescriptors,vLapping);
+     else
+         monoRight = (*mpORBextractorRight)(im,cv::Mat(),mvKeysRight,mDescriptorsRight,vLapping);
+ }
+@@ -1056,8 +1061,8 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+ #ifdef REGISTER_TIMES
+     std::chrono::steady_clock::time_point time_StartExtORB = std::chrono::steady_clock::now();
+ #endif
+-    thread threadLeft(&Frame::ExtractORB,this,0,imLeft,static_cast<KannalaBrandt8*>(mpCamera)->mvLappingArea[0],static_cast<KannalaBrandt8*>(mpCamera)->mvLappingArea[1]);
+-    thread threadRight(&Frame::ExtractORB,this,1,imRight,static_cast<KannalaBrandt8*>(mpCamera2)->mvLappingArea[0],static_cast<KannalaBrandt8*>(mpCamera2)->mvLappingArea[1]);
++    thread threadLeft(static_cast<void (Frame::*)(int, const cv::Mat &, const int, const int, const cv::Mat &)>(&Frame::ExtractORB),this,0,imLeft,static_cast<KannalaBrandt8*>(mpCamera)->mvLappingArea[0],static_cast<KannalaBrandt8*>(mpCamera)->mvLappingArea[1],cv::Mat());
++    thread threadRight(static_cast<void (Frame::*)(int, const cv::Mat &, const int, const int, const cv::Mat &)>(&Frame::ExtractORB),this,1,imRight,static_cast<KannalaBrandt8*>(mpCamera2)->mvLappingArea[0],static_cast<KannalaBrandt8*>(mpCamera2)->mvLappingArea[1],cv::Mat());
+     threadLeft.join();
+     threadRight.join();
+ #ifdef REGISTER_TIMES
+diff --git a/src/LocalMapping.cc b/src/LocalMapping.cc
+index 53df332..3750277 100644
+--- a/src/LocalMapping.cc
++++ b/src/LocalMapping.cc
+@@ -33,7 +33,7 @@ namespace ORB_SLAM3
+ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName):
+     mpSystem(pSys), mbMonocular(bMonocular), mbInertial(bInertial), mbResetRequested(false), mbResetRequestedActiveMap(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas), bInitializing(false),
+     mbAbortBA(false), mbStopped(false), mbStopRequested(false), mbNotStop(false), mbAcceptKeyFrames(true),
+-    mIdxInit(0), mScale(1.0), mInitSect(0), mbNotBA1(true), mbNotBA2(true), mIdxIteration(0), infoInertial(Eigen::MatrixXd::Zero(9,9))
++    mIdxInit(0), mScale(1.0), mInitSect(0), mbNotBA1(true), mbNotBA2(true), mbBadImu(false), mbDeferLowMotionReset(false), mIdxIteration(0), infoInertial(Eigen::MatrixXd::Zero(9,9))
+ {
+     mnMatchesInliers = 0;
+ 
+@@ -61,6 +61,11 @@ void LocalMapping::SetTracker(Tracking *pTracker)
+     mpTracker=pTracker;
+ }
+ 
++void LocalMapping::SetDeferLowMotionReset(bool defer)
++{
++    mbDeferLowMotionReset = defer;
++}
++
+ void LocalMapping::Run()
+ {
+     mbFinished = false;
+@@ -137,11 +142,18 @@ void LocalMapping::Run()
+                         {
+                             if((mTinit<10.f) && (dist<0.02))
+                             {
+-                                cout << "Not enough motion for initializing. Reseting..." << endl;
+-                                unique_lock<mutex> lock(mMutexReset);
+-                                mbResetRequestedActiveMap = true;
+-                                mpMapToReset = mpCurrentKeyFrame->GetMap();
+-                                mbBadImu = true;
++                                if(mbDeferLowMotionReset)
++                                {
++                                    cout << "Not enough motion for initializing. Defer active map reset before inertial BA2." << endl;
++                                }
++                                else
++                                {
++                                    cout << "Not enough motion for initializing. Reseting..." << endl;
++                                    unique_lock<mutex> lock(mMutexReset);
++                                    mbResetRequestedActiveMap = true;
++                                    mpMapToReset = mpCurrentKeyFrame->GetMap();
++                                    mbBadImu = true;
++                                }
+                             }
+                         }
+ 
+diff --git a/src/ORBextractor.cc b/src/ORBextractor.cc
+index 970b7cc..bfd26ec 100644
+--- a/src/ORBextractor.cc
++++ b/src/ORBextractor.cc
+@@ -778,10 +778,20 @@ namespace ORB_SLAM3
+         return vResultKeys;
+     }
+ 
+-    void ORBextractor::ComputeKeyPointsOctTree(vector<vector<KeyPoint> >& allKeypoints)
++    void ORBextractor::ComputeKeyPointsOctTree(vector<vector<KeyPoint> >& allKeypoints, const cv::Mat &mask)
+     {
+         allKeypoints.resize(nlevels);
+ 
++        const Mat originalMask = mask;
++        vector<Mat> levelMasks;
++        if(!mask.empty())
++        {
++            CV_Assert(mask.type() == CV_8UC1);
++            levelMasks.resize(nlevels);
++            for(int level = 0; level < nlevels; ++level)
++                resize(mask, levelMasks[level], mvImagePyramid[level].size(), 0, 0, INTER_NEAREST);
++        }
++
+         const float W = 35;
+ 
+         for (int level = 0; level < nlevels; ++level)
+@@ -864,6 +874,26 @@ namespace ORB_SLAM3
+                         {
+                             (*vit).pt.x+=j*wCell;
+                             (*vit).pt.y+=i*hCell;
++
++                            if(!levelMasks.empty())
++                            {
++                                // Filter by keypoint centre after FAST, before the octree
++                                // distributes features and before descriptors are computed.
++                                const int maskX = cvRound((*vit).pt.x + minBorderX);
++                                const int maskY = cvRound((*vit).pt.y + minBorderY);
++                                const int originalX = cvRound(maskX * mvScaleFactor[level]);
++                                const int originalY = cvRound(maskY * mvScaleFactor[level]);
++                                if(maskX < 0 || maskY < 0 ||
++                                   maskX >= levelMasks[level].cols || maskY >= levelMasks[level].rows ||
++                                   originalX < 0 || originalY < 0 ||
++                                   originalX >= originalMask.cols || originalY >= originalMask.rows ||
++                                   levelMasks[level].at<unsigned char>(maskY, maskX) == 0 ||
++                                   originalMask.at<unsigned char>(originalY, originalX) == 0)
++                                {
++                                    continue;
++                                }
++                            }
++
+                             vToDistributeKeys.push_back(*vit);
+                         }
+                     }
+@@ -1096,8 +1126,12 @@ namespace ORB_SLAM3
+         // Pre-compute the scale pyramid
+         ComputePyramid(image);
+ 
++        Mat mask = _mask.getMat();
++        if(!mask.empty() && mask.size() != image.size())
++            resize(mask, mask, image.size(), 0, 0, INTER_NEAREST);
++
+         vector < vector<KeyPoint> > allKeypoints;
+-        ComputeKeyPointsOctTree(allKeypoints);
++        ComputeKeyPointsOctTree(allKeypoints, mask);
+         //ComputeKeyPointsOld(allKeypoints);
+ 
+         Mat descriptors;
+diff --git a/src/Settings.cc b/src/Settings.cc
+index f1d23b6..0c3235a 100644
+--- a/src/Settings.cc
++++ b/src/Settings.cc
+@@ -125,7 +125,8 @@ namespace ORB_SLAM3 {
+     }
+ 
+     Settings::Settings(const std::string &configFile, const int& sensor) :
+-    bNeedToUndistort_(false), bNeedToRectify_(false), bNeedToResize1_(false), bNeedToResize2_(false) {
++    bNeedToUndistort_(false), bNeedToRectify_(false), bNeedToResize1_(false), bNeedToResize2_(false),
++    deferLowMotionReset_(false), deferPreBA2TrackingReset_(false) {
+         sensor_ = sensor;
+ 
+         //Open settings file
+@@ -315,10 +316,10 @@ namespace ORB_SLAM3 {
+             float cx = readParameter<float>(fSettings,"Camera2.cx",found);
+             float cy = readParameter<float>(fSettings,"Camera2.cy",found);
+ 
+-            float k0 = readParameter<float>(fSettings,"Camera1.k1",found);
+-            float k1 = readParameter<float>(fSettings,"Camera1.k2",found);
+-            float k2 = readParameter<float>(fSettings,"Camera1.k3",found);
+-            float k3 = readParameter<float>(fSettings,"Camera1.k4",found);
++            float k0 = readParameter<float>(fSettings,"Camera2.k1",found);
++            float k1 = readParameter<float>(fSettings,"Camera2.k2",found);
++            float k2 = readParameter<float>(fSettings,"Camera2.k3",found);
++            float k3 = readParameter<float>(fSettings,"Camera2.k4",found);
+ 
+ 
+             vCalibration = {fx,fy,cx,cy,k0,k1,k2,k3};
+@@ -429,6 +430,12 @@ namespace ORB_SLAM3 {
+         else{
+             insertKFsWhenLost_ = true;
+         }
++
++        int deferLowMotionReset = readParameter<int>(fSettings,"IMU.DeferLowMotionReset",found,false);
++        deferLowMotionReset_ = found && (deferLowMotionReset != 0);
++
++        int deferPreBA2TrackingReset = readParameter<int>(fSettings,"IMU.DeferPreBA2TrackingReset",found,false);
++        deferPreBA2TrackingReset_ = found && (deferPreBA2TrackingReset != 0);
+     }
+ 
+     void Settings::readRGBD(cv::FileStorage& fSettings) {
+@@ -624,6 +631,8 @@ namespace ORB_SLAM3 {
+             output << "\t-Gyro walk: " << settings.gyroWalk_ << endl;
+             output << "\t-Accelerometer walk: " << settings.accWalk_ << endl;
+             output << "\t-IMU frequency: " << settings.imuFrequency_ << endl;
++            output << "\t-Defer low-motion reset before inertial BA2: " << settings.deferLowMotionReset_ << endl;
++            output << "\t-Defer pre-BA2 tracking reset: " << settings.deferPreBA2TrackingReset_ << endl;
+         }
+ 
+         if(settings.sensor_ == System::RGBD || settings.sensor_ == System::IMU_RGBD){
+diff --git a/src/System.cc b/src/System.cc
+index 60d9c51..1e1d8f2 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -197,7 +197,10 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+     mptLocalMapping = new thread(&ORB_SLAM3::LocalMapping::Run,mpLocalMapper);
+     mpLocalMapper->mInitFr = initFr;
+     if(settings_)
++    {
+         mpLocalMapper->mThFarPoints = settings_->thFarPoints();
++        mpLocalMapper->SetDeferLowMotionReset(settings_->deferLowMotionReset());
++    }
+     else
+         mpLocalMapper->mThFarPoints = fsSettings["thFarPoints"];
+     if(mpLocalMapper->mThFarPoints!=0)
+@@ -397,6 +400,11 @@ Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const
+ }
+ 
+ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, const vector<IMU::Point>& vImuMeas, string filename)
++{
++    return TrackMonocular(im, cv::Mat(), timestamp, vImuMeas, filename);
++}
++
++Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const cv::Mat &mask, const double &timestamp, const vector<IMU::Point>& vImuMeas, string filename)
+ {
+ 
+     {
+@@ -412,10 +420,16 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp,
+     }
+ 
+     cv::Mat imToFeed = im.clone();
++    cv::Mat maskToFeed = mask.clone();
+     if(settings_ && settings_->needToResize()){
+         cv::Mat resizedIm;
+         cv::resize(im,resizedIm,settings_->newImSize());
+         imToFeed = resizedIm;
++        if(!maskToFeed.empty())
++            cv::resize(maskToFeed,maskToFeed,settings_->newImSize(),0,0,cv::INTER_NEAREST);
++    }
++    else if(!maskToFeed.empty() && maskToFeed.size() != imToFeed.size()){
++        cv::resize(maskToFeed,maskToFeed,imToFeed.size(),0,0,cv::INTER_NEAREST);
+     }
+ 
+     // Check mode change
+@@ -463,7 +477,7 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp,
+         for(size_t i_imu = 0; i_imu < vImuMeas.size(); i_imu++)
+             mpTracker->GrabImuData(vImuMeas[i_imu]);
+ 
+-    Sophus::SE3f Tcw = mpTracker->GrabImageMonocular(imToFeed,timestamp,filename);
++    Sophus::SE3f Tcw = mpTracker->GrabImageMonocular(imToFeed,maskToFeed,timestamp,filename);
+ 
+     unique_lock<mutex> lock2(mMutexState);
+     mTrackingState = mpTracker->mState;
+@@ -561,6 +575,11 @@ void System::Shutdown()
+ 
+ }
+ 
++bool System::isInertialBA1Initialized() {
++    Map* pCurrentMap = mpAtlas->GetCurrentMap();
++    return pCurrentMap && pCurrentMap->GetIniertialBA1();
++}
++
+ bool System::isShutDown() {
+     unique_lock<mutex> lock(mMutexReset);
+     return mbShutDown;
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 5191451..3f62912 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -46,7 +46,8 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
+     mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
+     mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
+     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
+-    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
++    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL)),
++    mDeferPreBA2TrackingReset(false)
+ {
+     // Load camera parameters from settings file
+     if(settings){
+@@ -603,6 +604,7 @@ void Tracking::newParameterLoader(Settings *settings) {
+     //IMU parameters
+     Sophus::SE3f Tbc = settings->Tbc();
+     mInsertKFsLost = settings->insertKFsWhenLost();
++    mDeferPreBA2TrackingReset = settings->deferPreBA2TrackingReset();
+     mImuFreq = settings->imuFrequency();
+     mImuPer = 0.001; //1.0 / (double) mImuFreq;     //TODO: ESTO ESTA BIEN?
+     float Ng = settings->noiseGyro();
+@@ -1330,6 +1332,13 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
+         mInsertKFsLost = (bool) node.operator int();
+     }
+ 
++    node = fSettings["IMU.DeferPreBA2TrackingReset"];
++    mDeferPreBA2TrackingReset = false;
++    if(!node.empty() && node.isInt())
++    {
++        mDeferPreBA2TrackingReset = (bool) node.operator int();
++    }
++
+     if(!mInsertKFsLost)
+         cout << "Do not insert keyframes when lost visual tracking " << endl;
+ 
+@@ -1564,6 +1573,11 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
+ 
+ 
+ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
++{
++    return GrabImageMonocular(im, cv::Mat(), timestamp, filename);
++}
++
++Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const cv::Mat &mask, const double &timestamp, string filename)
+ {
+     mImGray = im;
+     if(mImGray.channels()==3)
+@@ -1584,18 +1598,18 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
+     if (mSensor == System::MONOCULAR)
+     {
+         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
+-            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
++            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,static_cast<Frame*>(NULL),IMU::Calib(),mask);
+         else
+-            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
++            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,static_cast<Frame*>(NULL),IMU::Calib(),mask);
+     }
+     else if(mSensor == System::IMU_MONOCULAR)
+     {
+         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)
+         {
+-            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
++            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib,mask);
+         }
+         else
+-            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
++            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib,mask);
+     }
+ 
+     if (mState==NO_IMAGES_YET)
+@@ -2146,11 +2160,21 @@ void Tracking::Track()
+             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+             {
+                 Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
+-                if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
++                if(!pCurrentMap->isImuInitialized())
+                 {
+                     cout << "IMU is not or recently initialized. Reseting active map..." << endl;
+                     mpSystem->ResetActiveMap();
+                 }
++                else if(!pCurrentMap->GetIniertialBA2())
++                {
++                    if(mDeferPreBA2TrackingReset)
++                        cout << "IMU initialized before BA2. Defer active map reset while tracking is recently lost." << endl;
++                    else
++                    {
++                        cout << "IMU is not or recently initialized. Reseting active map..." << endl;
++                        mpSystem->ResetActiveMap();
++                    }
++                }
+ 
+                 mState=RECENTLY_LOST;
+             }

@@ -14,3 +14,5 @@ KeyFrameTrajectory.txt
 *ate.json
 __pycache__/
 *.pyc
+/.deps/
+/results/

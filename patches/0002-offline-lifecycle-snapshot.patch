@@ -1,0 +1,1324 @@
+diff --git a/include/LocalMapping.h b/include/LocalMapping.h
+index a1fc951..3dc7a88 100644
+--- a/include/LocalMapping.h
++++ b/include/LocalMapping.h
+@@ -27,6 +27,7 @@
+ #include "KeyFrameDatabase.h"
+ #include "Settings.h"
+ 
++#include <atomic>
+ #include <mutex>
+ 
+ 
+@@ -81,6 +82,13 @@ public:
+     double GetCurrKFTime();
+     KeyFrame* GetCurrKF();
+ 
++    // Offline lifecycle introspection. These getters only observe state and
++    // never touch the map update lock required by Tracking.
++    bool HasBadImu();
++    bool ResetPending();
++    bool ResetActiveMapPending();
++    unsigned long GetWorkGeneration();
++
+     std::mutex mMutexImuInit;
+ 
+     Eigen::MatrixXd mcovInertial;
+@@ -104,8 +112,9 @@ public:
+ 
+     bool mbNotBA1;
+     bool mbNotBA2;
+-    bool mbBadImu;
++    std::atomic<bool> mbBadImu;
+     bool mbDeferLowMotionReset;
++    std::atomic<unsigned long> mnWorkGeneration;
+ 
+     bool mbWriteStats;
+ 
+diff --git a/include/LoopClosing.h b/include/LoopClosing.h
+index c9ccb26..2a61c95 100644
+--- a/include/LoopClosing.h
++++ b/include/LoopClosing.h
+@@ -29,6 +29,7 @@
+ #include "KeyFrameDatabase.h"
+ 
+ #include <boost/algorithm/string.hpp>
++#include <atomic>
+ #include <thread>
+ #include <mutex>
+ #include "Thirdparty/g2o/g2o/types/types_seven_dof_expmap.h"
+@@ -82,6 +83,18 @@ public:
+ 
+     bool isFinished();
+ 
++    // Offline lifecycle introspection and safe runner management.
++    bool IsProcessing();
++    int PendingKeyFrames();
++    unsigned long GetWorkGeneration();
++    bool HasGlobalBundleAdjustmentWorker();
++    void RequestStopGlobalBundleAdjustmentAndJoin();
++
++    // Start/complete are public so the loop-closing paths and tests can use a
++    // single lifecycle implementation. Start expects no previous worker.
++    void StartGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoopKF);
++    void CompleteGlobalBundleAdjustment();
++
+     Viewer* mpViewer;
+ 
+ #ifdef REGISTER_TIMES
+@@ -218,6 +231,9 @@ protected:
+     bool mbStopGBA;
+     std::mutex mMutexGBA;
+     std::thread* mpThreadGBA;
++    std::mutex mMutexGBAThread;
++    std::atomic<bool> mbProcessingLoop;
++    std::atomic<unsigned long> mnWorkGeneration;
+ 
+     // Fix scale in the stereo/RGB-D case
+     bool mbFixScale;
+diff --git a/include/Settings.h b/include/Settings.h
+index ad42faa..861ae96 100644
+--- a/include/Settings.h
++++ b/include/Settings.h
+@@ -93,6 +93,7 @@ namespace ORB_SLAM3 {
+         bool insertKFsWhenLost() {return insertKFsWhenLost_;}
+         bool deferLowMotionReset() {return deferLowMotionReset_;}
+         bool deferPreBA2TrackingReset() {return deferPreBA2TrackingReset_;}
++        bool fastInit() {return fastInit_;}
+ 
+         float depthMapFactor() {return depthMapFactor_;}
+ 
+@@ -196,6 +197,7 @@ namespace ORB_SLAM3 {
+         bool insertKFsWhenLost_;
+         bool deferLowMotionReset_;
+         bool deferPreBA2TrackingReset_;
++        bool fastInit_;
+ 
+         /*
+          * RGBD stuff
+diff --git a/include/System.h b/include/System.h
+index 06f5e9f..2f11a7b 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -24,8 +24,11 @@
+ #include <unistd.h>
+ #include<stdio.h>
+ #include<stdlib.h>
++#include<atomic>
++#include<cstdint>
+ #include<string>
+ #include<thread>
++#include<vector>
+ #include<opencv2/core/core.hpp>
+ 
+ #include "Tracking.h"
+@@ -71,6 +74,40 @@ public:
+     }
+ };
+ 
++struct OfflineCameraPose
++{
++    OfflineCameraPose() : timestampNs(-1), mapId(0), recentlyLost(false) {}
++
++    std::int64_t timestampNs;
++    Eigen::Vector3f translation;
++    Eigen::Quaternionf orientation;
++    unsigned long mapId;
++    bool recentlyLost;
++};
++
++struct OfflineMapInfo
++{
++    OfflineMapInfo() : id(0), imuInitialized(false), inertialBA1(false),
++        inertialBA2(false), keyFrameCount(0), exportedFrames(0) {}
++
++    unsigned long id;
++    bool imuInitialized;
++    bool inertialBA1;
++    bool inertialBA2;
++    std::size_t keyFrameCount;
++    std::size_t exportedFrames;
++};
++
++enum class OfflineWaitStatus
++{
++    READY = 0,
++    CANCELLED = 1,
++    TIMEOUT = 2,
++    UNAVAILABLE = 3,
++    COMPLETE = 4,
++    INTERRUPTED = 5
++};
++
+ class Viewer;
+ class FrameDrawer;
+ class MapDrawer;
+@@ -143,6 +180,24 @@ public:
+     void Shutdown();
+     bool isShutDown();
+ 
++    // Offline-only lifecycle API. Offline mode changes TrackStereo to wait for
++    // Local Mapping readiness outside the map update lock, drains all mapping,
++    // loop closing and GBA work at EOF, and exposes a read-only final snapshot.
++    void SetOfflineMode(bool enabled);
++    bool isOfflineMode() const {return mOfflineMode;}
++    void SetOfflineTimeOriginNs(std::int64_t originNs);
++    void SetOfflineCancelFlag(const std::atomic<bool>* cancel);
++    void SetOfflineWaitTimeouts(int readyTimeoutMs, int drainTimeoutMs);
++    Sophus::SE3f TrackStereoOffline(const cv::Mat &imLeft, const cv::Mat &imRight,
++                                    std::int64_t timestampNs,
++                                    const vector<IMU::Point>& vImuMeas = vector<IMU::Point>());
++    OfflineWaitStatus WaitForLocalMappingReady(std::string* reason = nullptr);
++    OfflineWaitStatus WaitForOfflineDrain(std::string* reason = nullptr);
++    OfflineWaitStatus ShutdownOffline(std::string* reason = nullptr);
++    bool GetFinalOfflineSnapshot(std::vector<OfflineCameraPose>* poses,
++                                 std::vector<OfflineMapInfo>* maps,
++                                 std::string* errorMessage = nullptr);
++
+     // Save camera trajectory in the TUM RGB-D dataset format.
+     // Only for stereo and RGB-D. This method does not work for monocular.
+     // Call first Shutdown()
+@@ -268,6 +323,16 @@ private:
+     string mStrVocabularyFilePath;
+ 
+     Settings* settings_;
++
++    // Offline lifecycle state.
++    bool mOfflineMode;
++    std::int64_t mOfflineTimeOriginNs;
++    const std::atomic<bool>* mpOfflineCancel;
++    int mOfflineReadyTimeoutMs;
++    int mOfflineDrainTimeoutMs;
++    bool mbOfflineShutDown;
++
++    bool JoinWorkerThreads(bool drainFirst, std::string* reason);
+ };
+ 
+ }// namespace ORB_SLAM
+diff --git a/include/Tracking.h b/include/Tracking.h
+index c3ededd..cda459e 100644
+--- a/include/Tracking.h
++++ b/include/Tracking.h
+@@ -39,6 +39,7 @@
+ 
+ #include "GeometricCamera.h"
+ 
++#include <cstdint>
+ #include <mutex>
+ #include <unordered_set>
+ 
+@@ -53,6 +54,19 @@ class LoopClosing;
+ class System;
+ class Settings;
+ 
++struct OfflineFrameRecord
++{
++    OfflineFrameRecord() : timestampNs(-1), poseValid(false), lost(false),
++        recentlyLost(false), reference(static_cast<KeyFrame*>(NULL)) {}
++
++    std::int64_t timestampNs;
++    bool poseValid;
++    bool lost;
++    bool recentlyLost;
++    Sophus::SE3f relativePose;
++    KeyFrame* reference;
++};
++
+ class Tracking
+ {  
+ 
+@@ -159,6 +173,13 @@ public:
+     int mTrackedFr;
+     bool mbStep;
+ 
++    // Offline-only source timestamp and explicit per-frame validity records.
++    // mlRelativeFramePoses keeps the legacy duplicate-placeholder behaviour for
++    // existing callers; these records never treat that placeholder as a pose.
++    std::int64_t mnOfflineFrameTimestampNs = -1;
++    std::list<OfflineFrameRecord> mlOfflineFrameRecords;
++    void SetOfflineFrameTimestampNs(std::int64_t timestampNs) {mnOfflineFrameTimestampNs = timestampNs;}
++
+     // True if local mapping is deactivated and we are performing only localization
+     bool mbOnlyTracking;
+ 
+diff --git a/src/Frame.cc b/src/Frame.cc
+index e1d35c7..f72e57d 100644
+--- a/src/Frame.cc
++++ b/src/Frame.cc
+@@ -42,7 +42,7 @@ float Frame::mfGridElementWidthInv, Frame::mfGridElementHeightInv;
+ //For stereo fisheye matching
+ cv::BFMatcher Frame::BFmatcher = cv::BFMatcher(cv::NORM_HAMMING);
+ 
+-Frame::Frame(): mpcpi(NULL), mpImuPreintegrated(NULL), mpPrevFrame(NULL), mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mbHasPose(false), mbHasVelocity(false)
++Frame::Frame(): mpcpi(NULL), mpImuPreintegrated(NULL), mpPrevFrame(NULL), mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mpMutexImu(new std::mutex()), mbHasPose(false), mbHasVelocity(false)
+ {
+ #ifdef REGISTER_TIMES
+     mTimeStereoMatch = 0;
+@@ -101,7 +101,7 @@ Frame::Frame(const Frame &frame)
+ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeStamp, ORBextractor* extractorLeft, ORBextractor* extractorRight, ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera, Frame* pPrevF, const IMU::Calib &ImuCalib)
+     :mpcpi(NULL), mpORBvocabulary(voc),mpORBextractorLeft(extractorLeft),mpORBextractorRight(extractorRight), mTimeStamp(timeStamp), mK(K.clone()), mK_(Converter::toMatrix3f(K)), mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
+      mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false),
+-     mpCamera(pCamera) ,mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
++     mpMutexImu(new std::mutex()), mpCamera(pCamera) ,mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
+ {
+     // Frame ID
+     mnId=nNextId++;
+@@ -183,8 +183,6 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+         mVw.setZero();
+     }
+ 
+-    mpMutexImu = new std::mutex();
+-
+     //Set no stereo fisheye information
+     Nleft = -1;
+     Nright = -1;
+@@ -201,7 +199,7 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
+     :mpcpi(NULL),mpORBvocabulary(voc),mpORBextractorLeft(extractor),mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
+      mTimeStamp(timeStamp), mK(K.clone()), mK_(Converter::toMatrix3f(K)),mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
+      mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF), mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false),
+-     mpCamera(pCamera),mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
++     mpMutexImu(new std::mutex()), mpCamera(pCamera),mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
+ {
+     // Frame ID
+     mnId=nNextId++;
+@@ -271,8 +269,6 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
+         mVw.setZero();
+     }
+ 
+-    mpMutexImu = new std::mutex();
+-
+     //Set no stereo fisheye information
+     Nleft = -1;
+     Nright = -1;
+@@ -289,7 +285,7 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
+ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF, const IMU::Calib &ImuCalib, const cv::Mat &mask)
+     :mpcpi(NULL),mpORBvocabulary(voc),mpORBextractorLeft(extractor),mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
+      mTimeStamp(timeStamp), mK(static_cast<Pinhole*>(pCamera)->toK()), mK_(static_cast<Pinhole*>(pCamera)->toK_()), mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
+-     mImuCalib(ImuCalib), mpImuPreintegrated(NULL),mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mpCamera(pCamera),
++     mImuCalib(ImuCalib), mpImuPreintegrated(NULL),mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mpMutexImu(new std::mutex()), mpCamera(pCamera),
+      mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
+ {
+     // Frame ID
+@@ -377,8 +373,6 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
+     {
+         mVw.setZero();
+     }
+-
+-    mpMutexImu = new std::mutex();
+ }
+ 
+ 
+@@ -1038,7 +1032,7 @@ void Frame::setIntegrated()
+ 
+ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeStamp, ORBextractor* extractorLeft, ORBextractor* extractorRight, ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera, GeometricCamera* pCamera2, Sophus::SE3f& Tlr,Frame* pPrevF, const IMU::Calib &ImuCalib)
+         :mpcpi(NULL), mpORBvocabulary(voc),mpORBextractorLeft(extractorLeft),mpORBextractorRight(extractorRight), mTimeStamp(timeStamp), mK(K.clone()), mK_(Converter::toMatrix3f(K)),  mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
+-         mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbImuPreintegrated(false), mpCamera(pCamera), mpCamera2(pCamera2),
++         mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mpMutexImu(new std::mutex()), mpCamera(pCamera), mpCamera2(pCamera2),
+          mbHasPose(false), mbHasVelocity(false)
+ 
+ {
+@@ -1122,8 +1116,6 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+ 
+     AssignFeaturesToGrid();
+ 
+-    mpMutexImu = new std::mutex();
+-
+     UndistortKeyPoints();
+ 
+ }
+diff --git a/src/LocalMapping.cc b/src/LocalMapping.cc
+index 3750277..066e512 100644
+--- a/src/LocalMapping.cc
++++ b/src/LocalMapping.cc
+@@ -31,9 +31,10 @@ namespace ORB_SLAM3
+ {
+ 
+ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName):
+-    mpSystem(pSys), mbMonocular(bMonocular), mbInertial(bInertial), mbResetRequested(false), mbResetRequestedActiveMap(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas), bInitializing(false),
++    mpSystem(pSys), mbMonocular(bMonocular), mbInertial(bInertial), mbResetRequested(false), mbResetRequestedActiveMap(false), mbFinishRequested(false), mbFinished(false), mpAtlas(pAtlas), bInitializing(false),
+     mbAbortBA(false), mbStopped(false), mbStopRequested(false), mbNotStop(false), mbAcceptKeyFrames(true),
+-    mIdxInit(0), mScale(1.0), mInitSect(0), mbNotBA1(true), mbNotBA2(true), mbBadImu(false), mbDeferLowMotionReset(false), mIdxIteration(0), infoInertial(Eigen::MatrixXd::Zero(9,9))
++    mIdxInit(0), mScale(1.0), mInitSect(0), mbNotBA1(true), mbNotBA2(true), mbBadImu(false),
++    mbDeferLowMotionReset(false), mnWorkGeneration(0), mIdxIteration(0), infoInertial(Eigen::MatrixXd::Zero(9,9))
+ {
+     mnMatchesInliers = 0;
+ 
+@@ -298,6 +299,7 @@ void LocalMapping::InsertKeyFrame(KeyFrame *pKF)
+     unique_lock<mutex> lock(mMutexNewKFs);
+     mlNewKeyFrames.push_back(pKF);
+     mbAbortBA=true;
++    ++mnWorkGeneration;
+ }
+ 
+ 
+@@ -313,6 +315,7 @@ void LocalMapping::ProcessNewKeyFrame()
+         unique_lock<mutex> lock(mMutexNewKFs);
+         mpCurrentKeyFrame = mlNewKeyFrames.front();
+         mlNewKeyFrames.pop_front();
++        ++mnWorkGeneration;
+     }
+ 
+     // Compute Bags of Words structures
+@@ -1514,6 +1517,28 @@ bool LocalMapping::IsInitializing()
+     return bInitializing;
+ }
+ 
++bool LocalMapping::HasBadImu()
++{
++    return mbBadImu.load();
++}
++
++bool LocalMapping::ResetPending()
++{
++    unique_lock<mutex> lock(mMutexReset);
++    return mbResetRequested;
++}
++
++bool LocalMapping::ResetActiveMapPending()
++{
++    unique_lock<mutex> lock(mMutexReset);
++    return mbResetRequestedActiveMap;
++}
++
++unsigned long LocalMapping::GetWorkGeneration()
++{
++    return mnWorkGeneration.load();
++}
++
+ 
+ double LocalMapping::GetCurrKFTime()
+ {
+diff --git a/src/LoopClosing.cc b/src/LoopClosing.cc
+index 319afb5..be2e840 100644
+--- a/src/LoopClosing.cc
++++ b/src/LoopClosing.cc
+@@ -33,13 +33,13 @@ namespace ORB_SLAM3
+ {
+ 
+ LoopClosing::LoopClosing(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, const bool bFixScale, const bool bActiveLC):
+-    mbResetRequested(false), mbResetActiveMapRequested(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas),
+-    mpKeyFrameDB(pDB), mpORBVocabulary(pVoc), mpMatchedKF(NULL), mLastLoopKFid(0), mbRunningGBA(false), mbFinishedGBA(true),
+-    mbStopGBA(false), mpThreadGBA(NULL), mbFixScale(bFixScale), mnFullBAIdx(0), mnLoopNumCoincidences(0), mnMergeNumCoincidences(0),
++    mbResetRequested(false), mbResetActiveMapRequested(false), mbFinishRequested(false), mbFinished(false), mpAtlas(pAtlas),
++    mpKeyFrameDB(pDB), mpORBVocabulary(pVoc), mpCurrentKF(NULL), mpLastCurrentKF(NULL), mpMatchedKF(NULL), mLastLoopKFid(0), mbRunningGBA(false), mbFinishedGBA(true),
++    mbStopGBA(false), mpThreadGBA(NULL), mbProcessingLoop(false), mnWorkGeneration(0),
++    mbFixScale(bFixScale), mnFullBAIdx(0), mnLoopNumCoincidences(0), mnMergeNumCoincidences(0),
+     mbLoopDetected(false), mbMergeDetected(false), mnLoopNumNotFound(0), mnMergeNumNotFound(0), mbActiveLC(bActiveLC)
+ {
+     mnCovisibilityConsistencyTh = 3;
+-    mpLastCurrentKF = static_cast<KeyFrame*>(NULL);
+ 
+ #ifdef REGISTER_TIMES
+ 
+@@ -94,12 +94,34 @@ void LoopClosing::Run()
+     while(1)
+     {
+ 
++        // Place recognition disabled: consume pending keyframes so the offline
++        // EOF drain never waits forever on a queue this thread will not pop.
++        if(!mbActiveLC)
++        {
++            {
++                unique_lock<mutex> lock(mMutexLoopQueue);
++                while(!mlpLoopKeyFrameQueue.empty())
++                {
++                    KeyFrame* pKF = mlpLoopKeyFrameQueue.front();
++                    mlpLoopKeyFrameQueue.pop_front();
++                    pKF->SetErase();
++                    ++mnWorkGeneration;
++                }
++            }
++            ResetIfRequested();
++            if(CheckFinish())
++                break;
++            usleep(5000);
++            continue;
++        }
++
+         //NEW LOOP AND MERGE DETECTION ALGORITHM
+         //----------------------------
+ 
+ 
+         if(CheckNewKeyFrames())
+         {
++            mbProcessingLoop.store(true);
+             if(mpLastCurrentKF)
+             {
+                 mpLastCurrentKF->mvpLoopCandKFs.clear();
+@@ -150,6 +172,8 @@ void LoopClosing::Run()
+                                 mnMergeNumNotFound = 0;
+                                 mbMergeDetected = false;
+                                 Verbose::PrintMess("scale bad estimated. Abort merging", Verbose::VERBOSITY_NORMAL);
++                                mbProcessingLoop.store(false);
++                                ++mnWorkGeneration;
+                                 continue;
+                             }
+                             // If inertial, force only yaw
+@@ -293,6 +317,8 @@ void LoopClosing::Run()
+                 }
+ 
+             }
++            mbProcessingLoop.store(false);
++            ++mnWorkGeneration;
+             mpLastCurrentKF = mpCurrentKF;
+         }
+ 
+@@ -312,7 +338,10 @@ void LoopClosing::InsertKeyFrame(KeyFrame *pKF)
+ {
+     unique_lock<mutex> lock(mMutexLoopQueue);
+     if(pKF->mnId!=0)
++    {
+         mlpLoopKeyFrameQueue.push_back(pKF);
++        ++mnWorkGeneration;
++    }
+ }
+ 
+ bool LoopClosing::CheckNewKeyFrames()
+@@ -976,19 +1005,10 @@ void LoopClosing::CorrectLoop()
+     mpLocalMapper->EmptyQueue(); // Proccess keyframes in the queue
+ 
+     // If a Global Bundle Adjustment is running, abort it
+-    if(isRunningGBA())
++    if(isRunningGBA() || HasGlobalBundleAdjustmentWorker())
+     {
+         cout << "Stoping Global Bundle Adjustment...";
+-        unique_lock<mutex> lock(mMutexGBA);
+-        mbStopGBA = true;
+-
+-        mnFullBAIdx++;
+-
+-        if(mpThreadGBA)
+-        {
+-            mpThreadGBA->detach();
+-            delete mpThreadGBA;
+-        }
++        RequestStopGlobalBundleAdjustmentAndJoin();
+         cout << "  Done!!" << endl;
+     }
+ 
+@@ -1198,12 +1218,7 @@ void LoopClosing::CorrectLoop()
+     // Launch a new thread to perform Global Bundle Adjustment (Only if few keyframes, if not it would take too much time)
+     if(!pLoopMap->isImuInitialized() || (pLoopMap->KeyFramesInMap()<200 && mpAtlas->CountMaps()==1))
+     {
+-        mbRunningGBA = true;
+-        mbFinishedGBA = false;
+-        mbStopGBA = false;
+-        mnCorrectionGBA = mnNumCorrection;
+-
+-        mpThreadGBA = new thread(&LoopClosing::RunGlobalBundleAdjustment, this, pLoopMap, mpCurrentKF->mnId);
++        StartGlobalBundleAdjustment(pLoopMap, mpCurrentKF->mnId);
+     }
+ 
+     // Loop closed. Release Local Mapping.
+@@ -1228,18 +1243,9 @@ void LoopClosing::MergeLocal()
+ 
+     //Verbose::PrintMess("MERGE-VISUAL: Check Full Bundle Adjustment", Verbose::VERBOSITY_DEBUG);
+     // If a Global Bundle Adjustment is running, abort it
+-    if(isRunningGBA())
++    if(isRunningGBA() || HasGlobalBundleAdjustmentWorker())
+     {
+-        unique_lock<mutex> lock(mMutexGBA);
+-        mbStopGBA = true;
+-
+-        mnFullBAIdx++;
+-
+-        if(mpThreadGBA)
+-        {
+-            mpThreadGBA->detach();
+-            delete mpThreadGBA;
+-        }
++        RequestStopGlobalBundleAdjustmentAndJoin();
+         bRelaunchBA = true;
+     }
+ 
+@@ -1763,10 +1769,7 @@ void LoopClosing::MergeLocal()
+     if(bRelaunchBA && (!pCurrentMap->isImuInitialized() || (pCurrentMap->KeyFramesInMap()<200 && mpAtlas->CountMaps()==1)))
+     {
+         // Launch a new thread to perform Global Bundle Adjustment
+-        mbRunningGBA = true;
+-        mbFinishedGBA = false;
+-        mbStopGBA = false;
+-        mpThreadGBA = new thread(&LoopClosing::RunGlobalBundleAdjustment,this, pMergeMap, mpCurrentKF->mnId);
++        StartGlobalBundleAdjustment(pMergeMap, mpCurrentKF->mnId);
+     }
+ 
+     mpMergeMatchedKF->AddMergeEdge(mpCurrentKF);
+@@ -1801,18 +1804,9 @@ void LoopClosing::MergeLocal2()
+ 
+     //cout << "Check Full Bundle Adjustment" << endl;
+     // If a Global Bundle Adjustment is running, abort it
+-    if(isRunningGBA())
++    if(isRunningGBA() || HasGlobalBundleAdjustmentWorker())
+     {
+-        unique_lock<mutex> lock(mMutexGBA);
+-        mbStopGBA = true;
+-
+-        mnFullBAIdx++;
+-
+-        if(mpThreadGBA)
+-        {
+-            mpThreadGBA->detach();
+-            delete mpThreadGBA;
+-        }
++        RequestStopGlobalBundleAdjustmentAndJoin();
+         bRelaunchBA = true;
+     }
+ 
+@@ -2280,6 +2274,12 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
+ 
+     const bool bImuInit = pActiveMap->isImuInitialized();
+ 
++    if(pActiveMap->GetAllKeyFrames().empty())
++    {
++        CompleteGlobalBundleAdjustment();
++        return;
++    }
++
+     if(!bImuInit)
+         Optimizer::GlobalBundleAdjustemnt(pActiveMap,10,&mbStopGBA,nLoopKF,false);
+     else
+@@ -2297,41 +2297,54 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
+     }
+ #endif
+ 
+-    int idx =  mnFullBAIdx;
++    unsigned long idx;
++    {
++        unique_lock<mutex> lock(mMutexGBA);
++        idx = mnFullBAIdx;
++    }
+     // Optimizer::GlobalBundleAdjustemnt(mpMap,10,&mbStopGBA,nLoopKF,false);
+ 
+     // Update all MapPoints and KeyFrames
+     // Local Mapping was active during BA, that means that there might be new keyframes
+     // not included in the Global BA and they are not consistent with the updated map.
+-    // We need to propagate the correction through the spanning tree
++    // We need to propagate the correction through the spanning tree.
++    bool bOutdated = false;
+     {
+         unique_lock<mutex> lock(mMutexGBA);
+-        if(idx!=mnFullBAIdx)
+-            return;
++        bOutdated = (idx != mnFullBAIdx) || (!bImuInit && pActiveMap->isImuInitialized());
++    }
++    if(bOutdated)
++    {
++        CompleteGlobalBundleAdjustment();
++        return;
++    }
+ 
+-        if(!bImuInit && pActiveMap->isImuInitialized())
+-            return;
++    bool bStopped = false;
++    {
++        unique_lock<mutex> lock(mMutexGBA);
++        bStopped = mbStopGBA;
++    }
+ 
+-        if(!mbStopGBA)
+-        {
+-            Verbose::PrintMess("Global Bundle Adjustment finished", Verbose::VERBOSITY_NORMAL);
+-            Verbose::PrintMess("Updating map ...", Verbose::VERBOSITY_NORMAL);
++    if(!bStopped)
++    {
++        Verbose::PrintMess("Global Bundle Adjustment finished", Verbose::VERBOSITY_NORMAL);
++        Verbose::PrintMess("Updating map ...", Verbose::VERBOSITY_NORMAL);
+ 
+-            mpLocalMapper->RequestStop();
+-            // Wait until Local Mapping has effectively stopped
++        mpLocalMapper->RequestStop();
++        // Wait until Local Mapping has effectively stopped
+ 
+-            while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
+-            {
+-                usleep(1000);
+-            }
++        while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
++        {
++            usleep(1000);
++        }
+ 
+-            // Get Map Mutex
+-            unique_lock<mutex> lock(pActiveMap->mMutexMapUpdate);
+-            // cout << "LC: Update Map Mutex adquired" << endl;
++        // Get Map Mutex
++        unique_lock<mutex> lock(pActiveMap->mMutexMapUpdate);
++        // cout << "LC: Update Map Mutex adquired" << endl;
+ 
+-            //pActiveMap->PrintEssentialGraph();
+-            // Correct keyframes starting at map first keyframe
+-            list<KeyFrame*> lpKFtoCheck(pActiveMap->mvpKeyFrameOrigins.begin(),pActiveMap->mvpKeyFrameOrigins.end());
++        //pActiveMap->PrintEssentialGraph();
++        // Correct keyframes starting at map first keyframe
++        list<KeyFrame*> lpKFtoCheck(pActiveMap->mvpKeyFrameOrigins.begin(),pActiveMap->mvpKeyFrameOrigins.end());
+ 
+             while(!lpKFtoCheck.empty())
+             {
+@@ -2505,11 +2518,93 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
+             Verbose::PrintMess("Map updated!", Verbose::VERBOSITY_NORMAL);
+         }
+ 
+-        mbFinishedGBA = true;
+-        mbRunningGBA = false;
++
++    CompleteGlobalBundleAdjustment();
++}
++
++
++bool LoopClosing::IsProcessing()
++{
++    return mbProcessingLoop.load();
++}
++
++int LoopClosing::PendingKeyFrames()
++{
++    unique_lock<mutex> lock(mMutexLoopQueue);
++    return static_cast<int>(mlpLoopKeyFrameQueue.size());
++}
++
++unsigned long LoopClosing::GetWorkGeneration()
++{
++    return mnWorkGeneration.load();
++}
++
++bool LoopClosing::HasGlobalBundleAdjustmentWorker()
++{
++    unique_lock<mutex> lock(mMutexGBAThread);
++    return mpThreadGBA != NULL;
++}
++
++void LoopClosing::RequestStopGlobalBundleAdjustmentAndJoin()
++{
++    // Keep mMutexGBAThread held across stop+join+delete. Otherwise another
++    // caller can observe mpThreadGBA==NULL and start a new worker while the
++    // old worker is still running, sharing mbStopGBA and the same map.
++    unique_lock<mutex> workerLock(mMutexGBAThread);
++    thread* pWorker = mpThreadGBA;
++    mpThreadGBA = NULL;
++    if(pWorker)
++    {
++        {
++            unique_lock<mutex> lock(mMutexGBA);
++            mbStopGBA = true;
++            mnFullBAIdx++;
++        }
++        if(pWorker->joinable())
++            pWorker->join();
++        delete pWorker;
+     }
+ }
+ 
++void LoopClosing::StartGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoopKF)
++{
++    // Serialize worker replacement and creation. A new worker must not share
++    // mbStopGBA or map state with an old worker that is still joining.
++    unique_lock<mutex> workerLock(mMutexGBAThread);
++    if(mpThreadGBA)
++    {
++        thread* pOldWorker = mpThreadGBA;
++        mpThreadGBA = NULL;
++        {
++            unique_lock<mutex> lock(mMutexGBA);
++            mbStopGBA = true;
++            mnFullBAIdx++;
++        }
++        if(pOldWorker->joinable())
++            pOldWorker->join();
++        delete pOldWorker;
++    }
++
++    {
++        unique_lock<mutex> lock(mMutexGBA);
++        mbRunningGBA = true;
++        mbFinishedGBA = false;
++        mbStopGBA = false;
++        mnCorrectionGBA = mnNumCorrection;
++        mnFullBAIdx++;
++    }
++
++    thread* pWorker = new thread(&LoopClosing::RunGlobalBundleAdjustment, this, pActiveMap, nLoopKF);
++    mpThreadGBA = pWorker;
++}
++
++void LoopClosing::CompleteGlobalBundleAdjustment()
++{
++    unique_lock<mutex> lock(mMutexGBA);
++    mbFinishedGBA = true;
++    mbRunningGBA = false;
++}
++
+ void LoopClosing::RequestFinish()
+ {
+     unique_lock<mutex> lock(mMutexFinish);
+diff --git a/src/Settings.cc b/src/Settings.cc
+index 0c3235a..1170779 100644
+--- a/src/Settings.cc
++++ b/src/Settings.cc
+@@ -126,7 +126,7 @@ namespace ORB_SLAM3 {
+ 
+     Settings::Settings(const std::string &configFile, const int& sensor) :
+     bNeedToUndistort_(false), bNeedToRectify_(false), bNeedToResize1_(false), bNeedToResize2_(false),
+-    deferLowMotionReset_(false), deferPreBA2TrackingReset_(false) {
++    deferLowMotionReset_(false), deferPreBA2TrackingReset_(false), fastInit_(false) {
+         sensor_ = sensor;
+ 
+         //Open settings file
+@@ -436,6 +436,9 @@ namespace ORB_SLAM3 {
+ 
+         int deferPreBA2TrackingReset = readParameter<int>(fSettings,"IMU.DeferPreBA2TrackingReset",found,false);
+         deferPreBA2TrackingReset_ = found && (deferPreBA2TrackingReset != 0);
++
++        int fastInit = readParameter<int>(fSettings,"IMU.fastInit",found,false);
++        fastInit_ = found && (fastInit != 0);
+     }
+ 
+     void Settings::readRGBD(cv::FileStorage& fSettings) {
+diff --git a/src/System.cc b/src/System.cc
+index 1e1d8f2..d892656 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -23,6 +23,11 @@
+ #include <thread>
+ #include <pangolin/pangolin.h>
+ #include <iomanip>
++#include <algorithm>
++#include <cmath>
++#include <map>
++#include <set>
++#include <sstream>
+ #include <openssl/md5.h>
+ #include <boost/serialization/base_object.hpp>
+ #include <boost/serialization/string.hpp>
+@@ -41,7 +46,9 @@ Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
+ System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
+                const bool bUseViewer, const int initFr, const string &strSequence):
+     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
+-    mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false)
++    mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false),
++    settings_(nullptr), mOfflineMode(false), mOfflineTimeOriginNs(0), mpOfflineCancel(nullptr),
++    mOfflineReadyTimeoutMs(120000), mOfflineDrainTimeoutMs(600000), mbOfflineShutDown(false)
+ {
+     // Output welcome message
+     cout << endl <<
+@@ -311,6 +318,17 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight,
+         }
+     }
+ 
++    if(mOfflineMode)
++    {
++        std::string waitReason;
++        OfflineWaitStatus ready = WaitForLocalMappingReady(&waitReason);
++        if(ready != OfflineWaitStatus::READY)
++        {
++            cerr << "Offline tracking input rejected: " << waitReason << endl;
++            return Sophus::SE3f();
++        }
++    }
++
+     if (mSensor == System::IMU_STEREO)
+         for(size_t i_imu = 0; i_imu < vImuMeas.size(); i_imu++)
+             mpTracker->GrabImuData(vImuMeas[i_imu]);
+@@ -533,31 +551,233 @@ void System::Shutdown()
+         mbShutDown = true;
+     }
+ 
++    if(mOfflineMode)
++    {
++        std::string reason;
++        ShutdownOffline(&reason);
++        if(!reason.empty())
++            cout << "Offline shutdown: " << reason << endl;
++        return;
++    }
++
+     cout << "Shutdown" << endl;
++    JoinWorkerThreads(false, nullptr);
++}
++
++void System::SetOfflineMode(bool enabled)
++{
++    mOfflineMode = enabled;
++}
++
++void System::SetOfflineTimeOriginNs(std::int64_t originNs)
++{
++    mOfflineTimeOriginNs = originNs;
++}
++
++void System::SetOfflineCancelFlag(const std::atomic<bool>* cancel)
++{
++    mpOfflineCancel = cancel;
++}
++
++void System::SetOfflineWaitTimeouts(int readyTimeoutMs, int drainTimeoutMs)
++{
++    mOfflineReadyTimeoutMs = readyTimeoutMs;
++    mOfflineDrainTimeoutMs = drainTimeoutMs;
++}
++
++Sophus::SE3f System::TrackStereoOffline(const cv::Mat &imLeft, const cv::Mat &imRight,
++                                        std::int64_t timestampNs,
++                                        const vector<IMU::Point>& vImuMeas)
++{
++    const double relativeTimestamp =
++        static_cast<double>(timestampNs - mOfflineTimeOriginNs) * 1e-9;
++    mpTracker->SetOfflineFrameTimestampNs(timestampNs);
++    return TrackStereo(imLeft, imRight, relativeTimestamp, vImuMeas);
++}
++
++OfflineWaitStatus System::WaitForLocalMappingReady(std::string* reason)
++{
++    const std::chrono::steady_clock::time_point start =
++        std::chrono::steady_clock::now();
++    while(true)
++    {
++        if(mpOfflineCancel && mpOfflineCancel->load())
++        {
++            if(reason) *reason = "cancelled while waiting for Local Mapping";
++            return OfflineWaitStatus::CANCELLED;
++        }
++        if(mbOfflineShutDown || mpLocalMapper->isFinished())
++        {
++            if(reason) *reason = "Local Mapping is finished";
++            return OfflineWaitStatus::UNAVAILABLE;
++        }
++        if(mpLocalMapper->HasBadImu())
++        {
++            // Let Tracking observe mbBadImu and perform the reset itself.
++            if(reason) *reason = "Local Mapping requested an active map reset";
++            return OfflineWaitStatus::READY;
++        }
++
++        const bool resetPending = mpLocalMapper->ResetPending() ||
++                                  mpLocalMapper->ResetActiveMapPending();
++        const bool queueEmpty = mpLocalMapper->KeyframesInQueue() == 0;
++        const bool accepting = mpLocalMapper->AcceptKeyFrames();
++        const bool stopped = mpLocalMapper->isStopped();
++        const bool stopRequested = mpLocalMapper->stopRequested();
++        const bool initializing = mpLocalMapper->IsInitializing();
++        if(!resetPending && queueEmpty && accepting && !stopped &&
++           !stopRequested && !initializing)
++        {
++            if(reason) reason->clear();
++            return OfflineWaitStatus::READY;
++        }
++
++        const long long elapsedMs =
++            std::chrono::duration_cast<std::chrono::milliseconds>(
++                std::chrono::steady_clock::now() - start).count();
++        if(mOfflineReadyTimeoutMs > 0 && elapsedMs >= mOfflineReadyTimeoutMs)
++        {
++            std::ostringstream out;
++            out << "Local Mapping not ready after " << elapsedMs
++                << " ms (queue=" << mpLocalMapper->KeyframesInQueue()
++                << ", accept=" << accepting << ", stopped=" << stopped
++                << ", stopRequested=" << stopRequested
++                << ", resetPending=" << resetPending
++                << ", initializing=" << initializing << ")";
++            if(reason) *reason = out.str();
++            return OfflineWaitStatus::TIMEOUT;
++        }
++        usleep(1000);
++    }
++}
++
++OfflineWaitStatus System::WaitForOfflineDrain(std::string* reason)
++{
++    const std::chrono::steady_clock::time_point start =
++        std::chrono::steady_clock::now();
++    const auto localIdle = [this]() -> bool {
++        return mpLocalMapper->KeyframesInQueue() == 0 &&
++               mpLocalMapper->AcceptKeyFrames() &&
++               !mpLocalMapper->isStopped() &&
++               !mpLocalMapper->stopRequested() &&
++               !mpLocalMapper->IsInitializing() &&
++               !mpLocalMapper->ResetPending() &&
++               !mpLocalMapper->ResetActiveMapPending();
++    };
++    const auto loopIdle = [this]() -> bool {
++        return mpLoopCloser->PendingKeyFrames() == 0 &&
++               !mpLoopCloser->IsProcessing() &&
++               !mpLoopCloser->isRunningGBA();
++    };
++    const auto describe = [this]() -> std::string {
++        std::ostringstream out;
++        out << "localQueue=" << mpLocalMapper->KeyframesInQueue()
++            << ", localAccept=" << mpLocalMapper->AcceptKeyFrames()
++            << ", localStopped=" << mpLocalMapper->isStopped()
++            << ", localStopRequested=" << mpLocalMapper->stopRequested()
++            << ", localInitializing=" << mpLocalMapper->IsInitializing()
++            << ", localResetPending=" << mpLocalMapper->ResetPending()
++            << ", localResetActiveMapPending="
++            << mpLocalMapper->ResetActiveMapPending()
++            << ", loopQueue=" << mpLoopCloser->PendingKeyFrames()
++            << ", loopProcessing=" << mpLoopCloser->IsProcessing()
++            << ", gbaRunning=" << mpLoopCloser->isRunningGBA();
++        return out.str();
++    };
++
++    while(true)
++    {
++        if(mpOfflineCancel && mpOfflineCancel->load())
++        {
++            if(reason) *reason = "cancelled while draining offline work";
++            return OfflineWaitStatus::INTERRUPTED;
++        }
++
++        const bool localReady = localIdle();
++        const bool loopReady = loopIdle();
++
++        if(mpLocalMapper->isFinished() || mpLoopCloser->isFinished())
++        {
++            // A worker that stopped early is not a successful drain. Only
++            // report COMPLETE when no queue/busy/reset/GBA work remains.
++            if(localReady && loopReady)
++            {
++                if(reason) reason->clear();
++                return OfflineWaitStatus::COMPLETE;
++            }
++            if(reason)
++                *reason = "worker thread finished before drain completed (" +
++                          describe() + ")";
++            return OfflineWaitStatus::UNAVAILABLE;
++        }
++
++        if(localReady && loopReady)
++        {
++            const unsigned long generation =
++                mpLocalMapper->GetWorkGeneration() + mpLoopCloser->GetWorkGeneration();
++            usleep(10000);
++            const bool stable =
++                localIdle() && loopIdle() &&
++                generation == (mpLocalMapper->GetWorkGeneration() +
++                               mpLoopCloser->GetWorkGeneration());
++            if(stable)
++            {
++                if(reason) reason->clear();
++                return OfflineWaitStatus::COMPLETE;
++            }
++        }
++
++        const long long elapsedMs =
++            std::chrono::duration_cast<std::chrono::milliseconds>(
++                std::chrono::steady_clock::now() - start).count();
++        if(mOfflineDrainTimeoutMs > 0 && elapsedMs >= mOfflineDrainTimeoutMs)
++        {
++            std::ostringstream out;
++            out << "offline drain timed out after " << elapsedMs
++                << " ms (" << describe() << ")";
++            if(reason) *reason = out.str();
++            return OfflineWaitStatus::TIMEOUT;
++        }
++        usleep(1000);
++    }
++}
++
++bool System::JoinWorkerThreads(bool drainFirst, std::string* reason)
++{
++    if(drainFirst)
++        WaitForOfflineDrain(reason);
+ 
+     mpLocalMapper->RequestFinish();
+     mpLoopCloser->RequestFinish();
+-    /*if(mpViewer)
++
++    if(mptLoopClosing)
+     {
+-        mpViewer->RequestFinish();
+-        while(!mpViewer->isFinished())
+-            usleep(5000);
+-    }*/
++        if(mptLoopClosing->joinable())
++            mptLoopClosing->join();
++        delete mptLoopClosing;
++        mptLoopClosing = nullptr;
++    }
+ 
+-    // Wait until all thread have effectively stopped
+-    /*while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
+-    {
+-        if(!mpLocalMapper->isFinished())
+-            cout << "mpLocalMapper is not finished" << endl;*/
+-        /*if(!mpLoopCloser->isFinished())
+-            cout << "mpLoopCloser is not finished" << endl;
+-        if(mpLoopCloser->isRunningGBA()){
+-            cout << "mpLoopCloser is running GBA" << endl;
+-            cout << "break anyway..." << endl;
+-            break;
+-        }*/
+-        /*usleep(5000);
+-    }*/
++    // GBA workers are joined outside mMutexGBA and only after the loop closing
++    // thread has stopped creating new work.
++    mpLoopCloser->RequestStopGlobalBundleAdjustmentAndJoin();
++
++    if(mptLocalMapping)
++    {
++        if(mptLocalMapping->joinable())
++            mptLocalMapping->join();
++        delete mptLocalMapping;
++        mptLocalMapping = nullptr;
++    }
++
++    if(mpViewer && mptViewer)
++    {
++        mpViewer->RequestFinish();
++        if(mptViewer->joinable())
++            mptViewer->join();
++        delete mptViewer;
++        mptViewer = nullptr;
++    }
+ 
+     if(!mStrSaveAtlasToFile.empty())
+     {
+@@ -565,14 +785,126 @@ void System::Shutdown()
+         SaveAtlas(FileType::BINARY_FILE);
+     }
+ 
+-    /*if(mpViewer)
+-        pangolin::BindToContext("ORB-SLAM2: Map Viewer");*/
+-
+ #ifdef REGISTER_TIMES
+-    mpTracker->PrintTimeStats();
++    if(mpTracker)
++        mpTracker->PrintTimeStats();
+ #endif
++    return true;
++}
++
++OfflineWaitStatus System::ShutdownOffline(std::string* reason)
++{
++    if(mbOfflineShutDown)
++    {
++        if(reason) reason->clear();
++        return OfflineWaitStatus::COMPLETE;
++    }
++
++    OfflineWaitStatus status = WaitForOfflineDrain(reason);
++
++    // Always join every worker before returning. If drain was interrupted or
++    // timed out the caller can still publish a clearly marked partial result.
++    JoinWorkerThreads(false, nullptr);
++    mbOfflineShutDown = true;
++    {
++        unique_lock<mutex> lock(mMutexReset);
++        mbShutDown = true;
++    }
++    return status;
++}
++
++bool System::GetFinalOfflineSnapshot(std::vector<OfflineCameraPose>* poses,
++                                     std::vector<OfflineMapInfo>* maps,
++                                     std::string* errorMessage)
++{
++    if(!poses || !maps)
++    {
++        if(errorMessage) *errorMessage = "snapshot output pointers must not be null";
++        return false;
++    }
++    poses->clear();
++    maps->clear();
++
++    std::vector<Map*> allMaps = mpAtlas->GetAllMaps();
++    std::set<Map*> liveMaps;
++    std::map<unsigned long, std::size_t> mapIndex;
++    for(Map* pMap : allMaps)
++    {
++        if(!pMap)
++            continue;
++        liveMaps.insert(pMap);
++        OfflineMapInfo info;
++        info.id = pMap->GetId();
++        info.imuInitialized = pMap->isImuInitialized();
++        info.inertialBA1 = pMap->GetIniertialBA1();
++        info.inertialBA2 = pMap->GetIniertialBA2();
++        info.keyFrameCount = pMap->GetAllKeyFrames().size();
++        mapIndex[info.id] = maps->size();
++        maps->push_back(info);
++    }
++
++    std::set<std::int64_t> seenTimestamps;
++    for(const OfflineFrameRecord& record : mpTracker->mlOfflineFrameRecords)
++    {
++        if(!record.poseValid || !record.reference || record.timestampNs < 0)
++            continue;
++        if(seenTimestamps.count(record.timestampNs))
++            continue;
++
++        KeyFrame* pKF = record.reference;
++        Sophus::SE3f Trw;
++        int guard = 0;
++        while(pKF && pKF->isBad() && guard++ < 10000)
++        {
++            Trw = Trw * pKF->mTcp;
++            KeyFrame* pParent = pKF->GetParent();
++            if(pParent == pKF)
++            {
++                pKF = nullptr;
++                break;
++            }
++            pKF = pParent;
++        }
++        if(!pKF || pKF->isBad())
++            continue;
+ 
++        Map* pMap = pKF->GetMap();
++        if(!pMap || !liveMaps.count(pMap) || !pMap->isImuInitialized() || pMap->IsBad())
++            continue;
++
++        Trw = Trw * pKF->GetPose();
++        Sophus::SE3f Tcw = record.relativePose * Trw;
++        Sophus::SE3f Twc = Tcw.inverse();
++        if(!Twc.translation().allFinite() || !Twc.unit_quaternion().coeffs().allFinite())
++            continue;
++        Eigen::Quaternionf q = Twc.unit_quaternion();
++        const float norm = q.norm();
++        if(!std::isfinite(norm) || norm < 1e-8f)
++            continue;
++        q.normalize();
++
++        OfflineCameraPose pose;
++        pose.timestampNs = record.timestampNs;
++        pose.translation = Twc.translation();
++        pose.orientation = q;
++        pose.mapId = pMap->GetId();
++        pose.recentlyLost = record.recentlyLost;
++        poses->push_back(pose);
++        seenTimestamps.insert(record.timestampNs);
++
++        std::map<unsigned long, std::size_t>::const_iterator it = mapIndex.find(pose.mapId);
++        if(it != mapIndex.end())
++            ++((*maps)[it->second].exportedFrames);
++    }
+ 
++    std::sort(poses->begin(), poses->end(),
++              [](const OfflineCameraPose& a, const OfflineCameraPose& b) {
++                  if(a.timestampNs != b.timestampNs)
++                      return a.timestampNs < b.timestampNs;
++                  return a.mapId < b.mapId;
++              });
++    if(errorMessage) errorMessage->clear();
++    return true;
+ }
+ 
+ bool System::isInertialBA1Initialized() {
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 3f62912..0683631 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -611,6 +611,9 @@ void Tracking::newParameterLoader(Settings *settings) {
+     float Na = settings->noiseAcc();
+     float Ngw = settings->gyroWalk();
+     float Naw = settings->accWalk();
++    mFastInit = settings->fastInit();
++    if(mFastInit)
++        cout << "Fast IMU initialization. Acceleration is not checked \n";
+ 
+     const float sf = sqrt(mImuFreq);
+     mpImuCalib = new IMU::Calib(Tbc,Ng*sf,Na*sf,Ngw/sf,Naw/sf);
+@@ -2324,21 +2327,42 @@ void Tracking::Track()
+     if(mState==OK || mState==RECENTLY_LOST)
+     {
+         // Store frame pose information to retrieve the complete camera trajectory afterwards.
+-        if(mCurrentFrame.isSet())
++        if(mCurrentFrame.isSet() && mCurrentFrame.mpReferenceKF)
+         {
+             Sophus::SE3f Tcr_ = mCurrentFrame.GetPose() * mCurrentFrame.mpReferenceKF->GetPoseInverse();
+             mlRelativeFramePoses.push_back(Tcr_);
+             mlpReferences.push_back(mCurrentFrame.mpReferenceKF);
+             mlFrameTimes.push_back(mCurrentFrame.mTimeStamp);
+             mlbLost.push_back(mState==LOST);
++
++            OfflineFrameRecord record;
++            record.timestampNs = mnOfflineFrameTimestampNs;
++            record.poseValid = true;
++            record.lost = (mState==LOST);
++            record.recentlyLost = (mState==RECENTLY_LOST);
++            record.relativePose = Tcr_;
++            record.reference = mCurrentFrame.mpReferenceKF;
++            mlOfflineFrameRecords.push_back(record);
+         }
+         else
+         {
+-            // This can happen if tracking is lost
+-            mlRelativeFramePoses.push_back(mlRelativeFramePoses.back());
+-            mlpReferences.push_back(mlpReferences.back());
+-            mlFrameTimes.push_back(mlFrameTimes.back());
+-            mlbLost.push_back(mState==LOST);
++            // This can happen if tracking is lost. Keep the legacy duplicate
++            // placeholders, but record explicitly that this frame has no pose.
++            if(!mlRelativeFramePoses.empty())
++            {
++                mlRelativeFramePoses.push_back(mlRelativeFramePoses.back());
++                mlpReferences.push_back(mlpReferences.back());
++                mlFrameTimes.push_back(mlFrameTimes.back());
++                mlbLost.push_back(mState==LOST);
++            }
++
++            OfflineFrameRecord record;
++            record.timestampNs = mnOfflineFrameTimestampNs;
++            record.poseValid = false;
++            record.lost = (mState==LOST);
++            record.recentlyLost = (mState==RECENTLY_LOST);
++            record.reference = static_cast<KeyFrame*>(NULL);
++            mlOfflineFrameRecords.push_back(record);
+         }
+ 
+     }
+@@ -3848,6 +3872,8 @@ void Tracking::Reset(bool bLocMap)
+     mlpReferences.clear();
+     mlFrameTimes.clear();
+     mlbLost.clear();
++    mlOfflineFrameRecords.clear();
++    mnOfflineFrameTimestampNs = -1;
+     mCurrentFrame = Frame();
+     mnLastRelocFrameId = 0;
+     mLastFrame = Frame();
+@@ -3890,6 +3916,16 @@ void Tracking::ResetActiveMap(bool bLocMap)
+     mpKeyFrameDB->clearMap(pMap); // Only clear the active map references
+     Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+ 
++    // Frames belonging to the active map being discarded must not remain
++    // exportable, and the next frame carries a fresh source timestamp.
++    for(std::list<OfflineFrameRecord>::iterator rit=mlOfflineFrameRecords.begin();
++        rit!=mlOfflineFrameRecords.end(); ++rit)
++    {
++        if(rit->reference && rit->reference->GetMap()==pMap)
++            rit->poseValid = false;
++    }
++    mnOfflineFrameTimestampNs = -1;
++
+     // Clear Map (this erase MapPoints and KeyFrames)
+     mpAtlas->clearMap();
+ 
+@@ -4025,6 +4061,30 @@ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurr
+         }
+     }
+ 
++    // The offline snapshot is reconstructed from mlOfflineFrameRecords, not
++    // from mlRelativeFramePoses. Inertial map-scale corrections must update
++    // these records as well, otherwise a scale-refined map would export poses
++    // with the stale relative translation.
++    for(OfflineFrameRecord& record : mlOfflineFrameRecords)
++    {
++        if(!record.poseValid || !record.reference)
++            continue;
++        KeyFrame* pKF = record.reference;
++        int guard = 0;
++        while(pKF && pKF->isBad() && guard++ < 10000)
++        {
++            KeyFrame* pParent = pKF->GetParent();
++            if(pParent == pKF)
++            {
++                pKF = nullptr;
++                break;
++            }
++            pKF = pParent;
++        }
++        if(pKF && pKF->GetMap() == pMap)
++            record.relativePose.translation() *= s;
++    }
++
+     mLastBias = b;
+ 
+     mpLastKeyFrame = pCurrentKeyFrame;

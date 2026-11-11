@@ -113,6 +113,38 @@ ros2 run orbslam3 stereo-inertial PATH_TO_VOCABULARY PATH_TO_YAML_CONFIG_FILE BO
 
 3. Press `spacebar` in `Shell C` to resume bag file.  
 
+## EGO 离线双目惯性最短入口
+
+以下命令使用变量/占位符，不写死本机绝对路径。`EGO_BAG`、`EGO_CALIB` 是只读输入；`EGO_ROOT` 是当前仓库；`EGO_RESULTS` 建议放在仓库内被忽略的 `results/`。
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source "$EGO_ROOT/install/local_setup.bash"
+export EGO_VOCAB="$(ros2 pkg prefix orbslam3)/share/orbslam3/vocabulary/ORBvoc.txt"
+export EGO_CONFIG="$EGO_ROOT/config/stereo-inertial/EGO/EGO_stereo_inertial_job_004.yaml"
+mkdir -p "$EGO_RESULTS/time_alignment"
+
+# 1) 可选：从原 calib.yaml + MCAP 重新生成默认配置（默认拒绝覆盖）。
+ros2 run orbslam3 prepare-ego-stereo-inertial-config \
+  --calib "$EGO_CALIB" --bag "$EGO_BAG" \
+  --output "$EGO_RESULTS/generated_ego.yaml"
+
+# 2) 独立视觉旋转 vs 去 bias IMU 积分，输出可审查 JSON。
+ros2 run orbslam3 align-ego-stereo-inertial-time \
+  --calib "$EGO_CALIB" --bag "$EGO_BAG" \
+  --output "$EGO_RESULTS/time_alignment/imu_time_alignment.json"
+
+# 3) 完整离线运行；原配置保留标定 offset，推荐值用 CLI 显式覆盖。
+mkdir -p "$EGO_RESULTS/validated_offset"
+ros2 run orbslam3 stereo-inertial \
+  "$EGO_VOCAB" "$EGO_CONFIG" false false false \
+  --bag "$EGO_BAG" \
+  --output "$EGO_RESULTS/validated_offset/trajectory.txt" \
+  --imu-time-offset-sec 0.0281
+```
+
+结果查看：`trajectory.txt` 是左 cam `Twc` 的 TUM（秒/米/归一化 `qx qy qz qw`，时间保留原图像 ns）；`trajectory.summary.json` 有 complete/failed、eligible/提交/有效、total/main 覆盖率、map 初始化/BA 和实际使用 offset；`trajectory.log` 是可读统计。默认不覆盖已有输出，只有 `--overwrite` 才替换本 stem 的旧 manifest 产物；输入 bag/calib/config/vocabulary 只读，不能用覆盖参数绕过。失败、未初始化、后台未排空、低于 95%/90% 门槛或读/解码异常都会非零退出。完整依赖准备、补丁栈、配置生成、offset 核验和验收记录见 `doc/ego_offline_stereo_inertial_dependencies.md`。
+
 ## Acknowledgments
 This repository is modified from [this](https://github.com/curryc/ros2_orbslam3) repository.  
 To add `stereo-inertial` mode and improve build difficulites.
