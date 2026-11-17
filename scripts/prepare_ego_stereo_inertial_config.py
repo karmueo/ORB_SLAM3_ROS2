@@ -294,7 +294,15 @@ def _iter_bag_messages(
         from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
         from sensor_msgs.msg import CompressedImage, Imu
     except ImportError as exc:
-        raise ConversionError("需要 ROS 2 rosbag2_py、rclpy 和 sensor_msgs") from exc
+        raise ConversionError(
+            "需要 ROS 2 rosbag2_py、rclpy 和 sensor_msgs\n"
+            f"当前 Python: {sys.executable} (Python {sys.version.split()[0]})\n"
+            f"原始导入错误: {exc}\n"
+            "请先 source 对应 ROS 2 的 setup.bash。若通过 apt 安装 ROS 2，"
+            "请退出虚拟环境后重试，或显式使用系统 Python:\n"
+            "ros2 run --prefix /usr/bin/python3 orbslam3 "
+            "prepare-ego-stereo-inertial-config <原命令参数>"
+        ) from exc
 
     try:
         reader = SequentialReader()

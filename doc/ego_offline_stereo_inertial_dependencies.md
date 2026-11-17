@@ -184,6 +184,8 @@ source \
 
 ## 4. 生成常规标定配置
 
+转换器使用当前 `PATH` 中的 `python3`。apt 安装的 Jazzy 在本环境中使用系统 Python 3.12；其他 Python 版本的虚拟环境无法加载其 ROS 扩展，重复 `source` 不会切换解释器。若终端激活了 `.venv`，先执行 `deactivate`，或在下面命令中将 `ros2 run orbslam3` 改为 `ros2 run --prefix /usr/bin/python3 orbslam3`。导入失败时，转换器会显示当前解释器和原始异常。
+
 ```bash
 # 从原始标定和 MCAP 生成常规 ORB_SLAM3 配置
 ros2 run orbslam3 prepare-ego-stereo-inertial-config \

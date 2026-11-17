@@ -117,6 +117,8 @@ ros2 run orbslam3 stereo-inertial PATH_TO_VOCABULARY PATH_TO_YAML_CONFIG_FILE BO
 
 以下命令使用变量/占位符，不写死本机绝对路径。`EGO_BAG`、`EGO_CALIB` 是只读输入；`EGO_ROOT` 是当前仓库；`EGO_RESULTS` 建议放在仓库内被忽略的 `results/`。
 
+Python 工具通过 `#!/usr/bin/env python3` 使用当前环境的解释器。本机 apt 安装的 ROS 2 Jazzy 使用系统 Python 3.12；如果终端激活了其他 Python 版本的 `.venv`，再次 `source` ROS 环境也不会切换解释器。请先 `deactivate`，或保留虚拟环境并用 `ros2 run --prefix /usr/bin/python3 orbslam3 prepare-ego-stereo-inertial-config ...` 显式指定系统 Python。
+
 ```bash
 source /opt/ros/jazzy/setup.bash
 source "$EGO_ROOT/install/local_setup.bash"
