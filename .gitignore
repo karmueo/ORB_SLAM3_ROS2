@@ -9,6 +9,7 @@ KeyFrameTrajectory.txt
 /CTestCustom.cmake
 /CTestTestfile.cmake
 /cmake_install.cmake
+/symlink_install_manifest.txt
 /Makefile
 /Testing/
 *ate.json
